@@ -62,7 +62,7 @@ node test/check.mjs
 
 假 Cordis context 的回归检查，覆盖：树内共享、外树隔离、同 key 覆盖、摘要截断、全文读取、收回、落盘重放、外部改写采纳、配置归一化。
 
-2026-11-09 在本机 DSH 实测：
+实测记录：
 
 1. 主 Agent 写入 `demo/handoff`；一个正在 `Start-Sleep` 的子 Agent，在等待后的下一步 runtime snapshot 里看到了这条痕迹——**没有调用 `stigmergy_read`，也没有收到任何消息**。
 2. 子 Agent 写入 `demo/decision`；主 Agent 下一步的 runtime context 里出现。
@@ -70,7 +70,7 @@ node test/check.mjs
 
 ## 边界
 
-- 工具是**全局**注册的，任何继承了全局工具的 preset 都能用。像「老板模式」这种主动屏蔽全局工具的 preset，主 Agent 看不到痕迹，但它派生的 `standard` 子 Agent 能看到——这正好是痕迹协作生效的地方。
+- 工具是**全局**注册的，preset 的既有作用域规则照常生效：若某个 preset 主动屏蔽了全局工具，该 preset 的 Agent 就看不到痕迹场；它派生的子 Agent 只要继承全局工具，仍然能看到。插件不认识、也不依赖任何具体 preset。
 - 痕迹是给「同一棵树里正在跑的 Agent」看的，不替代 subagent 的最终报告：报告仍然回到父 Agent，痕迹是**平级共享**的那一层。
 - 落盘用 Host 进程直接写文件，不受模型工具沙箱约束；写失败只会降级成内存态，不会让工具调用失败。
 
