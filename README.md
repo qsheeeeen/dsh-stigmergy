@@ -18,11 +18,11 @@
 ## 安装
 
 ```powershell
-# 在 DSH 里
-plugin_manager → install_bundle，target = 本目录
+git clone https://github.com/qsheeeeen/dsh-stigmergy
 ```
 
-或用 Creator 模式安装，然后重启 DSH。
+然后在 DSH 里 `plugin_manager` → `install_bundle`，target 指向 clone 下来的目录（或用 Creator 模式安装），重启 DSH 即生效。
+
 
 ## 工具
 
