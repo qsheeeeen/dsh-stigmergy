@@ -6,20 +6,20 @@
  * follows it. The trace carries the information, so there is no sender, no
  * recipient, and no rendezvous. Biologists call this stigmergy.
  *
- * This plugin gives one delegation tree the same mechanism. Every agent in the
- * tree — the parent and all of its subagents — reads one bounded, evaporating
+ * This plugin gives one session's agents the same mechanism. Every agent in the
+ * session — the parent and all of its subagents — reads one bounded, evaporating
  * field of traces. The field is rendered into each agent's runtime context
- * before every model request, so a trace one agent leaves is already in a
- * peer's next step: no `send_message`, no parent relaying, and no N² message
- * graph.
+ * before every model request, so a trace one agent leaves is already in
+ * another agent's next step: no `send_message`, no parent relaying, and no N²
+ * message graph.
  *
  * The surfaces are three tools:
- *   - `stigmergy_leave` writes or replaces one trace; `key` names the slot,
+ *   - `stigmergy_leave` writes or replaces one trace; `key` names the trace,
  *     so the field stays current state rather than a chat log.
- *   - `stigmergy_read` returns the field, or the full text of named traces.
- *   - `stigmergy_clear` retracts a trace before it evaporates.
+ *   - `stigmergy_read` returns the field, or the detail behind named traces.
+ *   - `stigmergy_clear` removes a trace before it evaporates.
  *
- * The field is mirrored to `<cwd>/.dsh-stigmergy/<colony>.jsonl`, so it
+ * The field is mirrored to `<cwd>/.dsh-stigmergy/<scope>.jsonl`, so it
  * survives a Host restart and ordinary file tools can inspect it.
  *
  * @module @local/dsh-stigmergy
@@ -44,7 +44,7 @@ const CLEAR = 'stigmergy_clear'
 const KINDS = ['note', 'decision', 'finding', 'task', 'question', 'done']
 
 /**
- * Bounds for the two halves of a trace. Every peer pays for the title on every
+ * Bounds for the two halves of a trace. Every agent pays for the title on every
  * step, so it is short by contract; the detail is paid only on request.
  */
 const TITLE_LIMIT = 160
@@ -62,17 +62,17 @@ const PROTOCOL_SECTION_ORDER = 2950
  * field. The field itself is a separate runtime context.
  */
 const PROTOCOL = [
-  'Coordination here is stigmergic: every agent in this delegation tree shares one trace field',
+  'Coordination here is stigmergic: the agents in this session share one field of traces',
   '(`stigmergy_leave`, `stigmergy_read`, `stigmergy_clear`) that is read before each of your steps.',
-  'Publish what a peer needs — a decision, a finding, a claim, a handoff, a blocker — by changing the',
-  'field instead of sending a message; peers pick it up on their own next step. Read the field before',
-  'you redo work someone else may have already started.',
+  'Publish what another agent needs — a decision, a finding, a claim, a handoff, a blocker — by',
+  'changing the field instead of sending a message; they pick it up on their own next step. Read the',
+  'field before you redo work someone else may have already started.',
 ].join(' ')
 
 /** Defaults for every tunable; `cordis.patch.yml` overrides them per profile. */
 const DEFAULTS = Object.freeze({
   directory: '.dsh-stigmergy',
-  scope: 'tree',
+  scope: 'session',
   maxEntries: 12,
   maxTextChars: 280,
   defaultTtlMinutes: 90,
@@ -148,7 +148,7 @@ function normalizeConfig(raw) {
   const directory = typeof config.directory === 'string' ? config.directory.trim() : DEFAULTS.directory
   return {
     directory,
-    scope: config.scope === 'workspace' ? 'workspace' : 'tree',
+    scope: config.scope === 'workspace' ? 'workspace' : 'session',
     maxEntries: integer(config.maxEntries, DEFAULTS.maxEntries, 1, 50),
     maxTextChars: integer(config.maxTextChars, DEFAULTS.maxTextChars, 60, 2000),
     defaultTtlMinutes: integer(config.defaultTtlMinutes, DEFAULTS.defaultTtlMinutes, 0, 10080),
@@ -160,7 +160,7 @@ function normalizeConfig(raw) {
  * Parse one trace read back from the mirror. The shape is exact: a record that
  * does not carry every required field is not a trace, and is dropped rather
  * than repaired, because repairing would put a half-written line into a field
- * that every peer reads on every step.
+ * that every agent reads on every step.
  * @param value - a parsed JSONL record payload.
  * @returns the trace, or undefined when the record is not one.
  */
@@ -186,19 +186,18 @@ function readTrace(value) {
 }
 
 /**
- * One delegation tree's shared field: the traces plus the colony each one
- * belongs to, backed by an append-only JSONL mirror under the tree's working
- * directory.
+ * One field: the traces in one scope, backed by an append-only JSONL mirror
+ * under the scope's working directory.
  */
 class Field {
   /** @type {ReturnType<typeof normalizeConfig>} */
   #options
   /** @type {import('@deepseek-ai/cordis').Context} */
   #ctx
-  /** colony key → field state. @type {Map<string, {key: string, file: string | undefined, entries: Map<string, object>, loaded: boolean, mtimeMs: number, appends: number}>} */
+  /** scope key → field state. @type {Map<string, {key: string, file: string | undefined, entries: Map<string, object>, loaded: boolean, mtimeMs: number, appends: number}>} */
   #states = new Map()
-  /** agent id → colony key. @type {Map<string, string>} */
-  #colonies = new Map()
+  /** agent id → scope key. @type {Map<string, string>} */
+  #scopeKeys = new Map()
   /** agent id → resolved identity. @type {Map<string, {id: string, name: string, role: string}>} */
   #identities = new Map()
 
@@ -212,13 +211,14 @@ class Field {
   }
 
   /**
-   * Resolve who is writing, so a trace carries a name a peer can act on rather
+   * Resolve who is writing, so a trace carries a name a another agent can act on rather
    * than an opaque session id.
    *
    * The two coordination modes the harness supports have different durable
-   * identities. A Team member has a name the roster and every peer already use;
-   * a plain delegated child only has the label its parent chose when starting
-   * it. Both are recognisable to a peer reading the field; a session id is not.
+   * identities. A Team member has a name the roster and the other agents already
+   * use; a plain delegated child only has the label its parent chose when
+   * starting it. Both are recognisable to another agent reading the field; a
+   * session id is not.
    * Resolution is cached because a label costs one parent-catalog read and
    * never changes afterwards.
    *
@@ -233,7 +233,7 @@ class Field {
 
     const header = agent.session?.header
 
-    // A Team name outranks a delegation label: it is what peers address.
+    // A Team name outranks a subagent label: it is what other agents address.
     const teams = this.#ctx.get('agentTeams')
     if (teams !== undefined) {
       try {
@@ -246,7 +246,7 @@ class Field {
       } catch {}
     }
 
-    // A delegated child is known to its peers by the label its parent chose.
+    // A delegated child is known by the label its parent chose.
     const parentId = header?.parentSession
     if (parentId !== undefined && parentId !== null) {
       const subagents = this.#ctx.get('subagents')
@@ -283,11 +283,11 @@ class Field {
   }
 
   /**
-   * Resolve the colony an agent belongs to. A colony is the root of the
-   * delegation tree the agent was spawned in, so a parent and all of its
-   * descendants — however deep — smell the same field. In `workspace` scope
-   * the working directory is the colony instead, so separate conversations in
-   * one project share a field.
+   * Resolve the scope an agent's field belongs to. In `session` scope it is the
+   * root session of the subagent tree the agent was spawned in, so a parent and
+   * all of its descendants — however deep — share one field. In `workspace`
+   * scope the working directory is the scope instead, so separate conversations
+   * in one project share a field.
    *
    * Resolution walks live ancestor sessions, because a child's header names its
    * parent and the parent is alive while its child is. When an ancestor is
@@ -295,19 +295,19 @@ class Field {
    * key stable for the agents that are still running.
    *
    * @param agent - the calling agent.
-   * @returns the colony key, or undefined when the agent has no session.
+   * @returns the scope key, or undefined when the agent has no session.
    */
-  colonyOf(agent) {
+  scopeKeyOf(agent) {
     const id = agent?.id
     const own = agent?.session
     if (typeof id !== 'string' || own === undefined || own === null) return undefined
 
-    const cached = this.#colonies.get(id)
+    const cached = this.#scopeKeys.get(id)
     if (cached !== undefined) return cached
 
     const sessions = this.#ctx.get('sessions')
     let root = own
-    if (this.#options.scope === 'tree') {
+    if (this.#options.scope === 'session') {
       const seen = new Set([own.id])
       let cursor = own
       for (;;) {
@@ -324,16 +324,16 @@ class Field {
     const workspace = root.header?.cwd ?? own.header?.cwd
     const key = this.#options.scope === 'workspace'
       ? `w:${workspace ?? 'unknown'}`
-      : `t:${root.id}`
-    this.#colonies.set(id, key)
+      : `s:${root.id}`
+    this.#scopeKeys.set(id, key)
     if (!this.#states.has(key)) this.#states.set(key, this.#blankState(key, workspace))
     return key
   }
 
   /**
-   * Build an unloaded field state for one colony.
-   * @param key - the colony key.
-   * @param workspace - the colony root's working directory, when known.
+   * Build an unloaded field state for one scope.
+   * @param key - the scope key.
+   * @param workspace - the scope root's working directory, when known.
    * @returns the state record.
    */
   #blankState(key, workspace) {
@@ -345,9 +345,9 @@ class Field {
   }
 
   /**
-   * Read the colony's mirror when it changed underneath this process, so an
+   * Read the field's mirror when it changed underneath this process, so an
    * edit made by an ordinary file tool is picked up like any other trace.
-   * @param key - the colony key.
+   * @param key - the scope key.
    * @returns the field state, loaded when a mirror exists.
    */
   #state(key) {
@@ -397,8 +397,8 @@ class Field {
   }
 
   /**
-   * Live traces in one colony, newest first.
-   * @param key - the colony key.
+   * Live traces in one field, newest first.
+   * @param key - the scope key.
    * @returns traces whose evaporation time has not passed.
    */
   list(key) {
@@ -415,8 +415,8 @@ class Field {
 
   /**
    * Write or replace one trace. Replacing keeps `createdAt` and bumps `rev`, so
-   * a peer can tell an updated fact from a new one without a log.
-   * @param key - the colony key.
+   * a another agent can tell an updated fact from a new one without a log.
+   * @param key - the scope key.
    * @param input - the trace fields.
    * @returns the stored trace.
    */
@@ -445,8 +445,8 @@ class Field {
 
   /**
    * Retract one trace.
-   * @param key - the colony key.
-   * @param traceKey - the slot to remove.
+   * @param key - the scope key.
+   * @param traceKey - the trace key to remove.
    * @returns whether a trace was removed.
    */
   remove(key, traceKey) {
@@ -457,9 +457,9 @@ class Field {
   }
 
   /**
-   * Append one operation to the colony's mirror. A failed write degrades the
+   * Append one operation to the field's mirror. A failed write degrades the
    * field to memory-only for this process; it never fails the tool call.
-   * @param state - the colony's field state.
+   * @param state - the scope's field state.
    * @param record - the operation to persist.
    */
   #append(state, record) {
@@ -482,7 +482,7 @@ class Field {
   /**
    * Rewrite the mirror as the live field, so evaporated and retracted traces do
    * not accumulate forever.
-   * @param state - the colony's field state.
+   * @param state - the scope's field state.
    */
   #compact(state) {
     try {
@@ -499,14 +499,14 @@ class Field {
 
   /**
    * The bounded field snapshot injected into every step. Empty while nothing
-   * has ever been left, so a tree that does not use the field pays nothing.
+   * has ever been left, so a session that never uses the field pays nothing.
    * @param agent - the agent whose step is being assembled.
    * @returns the model-facing snapshot, or an empty string.
    */
   summary(agent) {
-    const colony = this.colonyOf(agent)
-    if (colony === undefined) return ''
-    const traces = this.list(colony)
+    const scope = this.scopeKeyOf(agent)
+    if (scope === undefined) return ''
+    const traces = this.list(scope)
     if (traces.length === 0) return ''
 
     const shown = traces.slice(0, this.#options.maxEntries)
@@ -516,8 +516,8 @@ class Field {
       const title = clip(oneLine(trace.title), this.#options.maxTextChars)
       return `- [${trace.kind}] ${trace.key} · ${trace.author} · ${ago(trace.updatedAt)} — ${title}`
     })
-    const head = `Shared field (stigmergy): ${traces.length} trace${traces.length === 1 ? '' : 's'}; you are ${self}. `
-      + `Peers pick up a change on their next step — nothing is sent as a message. `
+    const head = `Shared field: ${traces.length} trace${traces.length === 1 ? '' : 's'}; you are ${self}. `
+      + `Other agents pick up a change on their next step — nothing is sent as a message. `
       + `Write or replace one with \`${LEAVE}\`; \`${READ}\` returns the detail behind a title.`
     return hidden === 0
       ? [head, '', ...lines].join('\n')
@@ -525,18 +525,18 @@ class Field {
   }
 
   /**
-   * The full, untruncated field or a named subset, for a caller that needs the
-   * exact text.
+   * The whole field, or a named subset, with each trace's detail. The snapshot
+   * carries titles only, so this is where the evidence is fetched.
    * @param agent - the calling agent.
-   * @param keys - restrict to these slots; omitted reads the whole field.
+   * @param keys - restrict to these trace keys; omitted reads the whole field.
    * @returns the rendered field.
    */
   read(agent, keys) {
-    const colony = this.colonyOf(agent)
-    if (colony === undefined) throw new Error(`${READ} requires an owning agent session`)
-    const traces = this.list(colony)
+    const scope = this.scopeKeyOf(agent)
+    if (scope === undefined) throw new Error(`${READ} requires an owning agent session`)
+    const traces = this.list(scope)
     if (traces.length === 0) {
-      return `The shared field is empty. \`${LEAVE}\` writes the first trace for this delegation tree.`
+      return `The shared field is empty. \`${LEAVE}\` writes the first trace here.`
     }
     const wanted = Array.isArray(keys) && keys.length > 0 ? new Set(keys) : undefined
     const selected = wanted === undefined ? traces : traces.filter((trace) => wanted.has(trace.key))
@@ -565,15 +565,15 @@ class Field {
       ].join('\n')
     })
     const hidden = traces.length - selected.length
-    const head = `Shared field (${colony}) — ${selected.length} of ${traces.length} traces; you are ${shortId(agent?.id)}.`
+    const head = `Shared field — ${selected.length} of ${traces.length} traces; you are ${shortId(agent?.id)}.`
     const tail = hidden > 0 ? `\n\n${hidden} other trace${hidden === 1 ? '' : 's'} not shown.` : ''
     return `${head}\n\n${blocks.join('\n\n')}${tail}`
   }
 }
 
 /**
- * Normalize a trace key: trimmed, bounded, and non-empty. Keys are the slot a
- * peer replaces, so they must be memorable enough to name again.
+ * Normalize a trace key: trimmed, bounded, and non-empty. Keys are what
+ * another agent names to replace a trace, so they must be memorable.
  * @param value - the model-supplied key.
  * @returns the canonical key.
  */
@@ -617,10 +617,10 @@ export function apply(ctx, config) {
   const leave = textTool({
     name: LEAVE,
     description:
-      'Write or replace one trace in the shared field that every agent in this delegation tree reads before each of its steps. '
-      + 'Use it to publish a decision, a finding, a claim on a file, a handoff, or a blocker instead of messaging a peer: the trace reaches them on their own next step, with no sender, no recipient, and no relay. '
-      + '`key` names the slot, so writing the same key replaces the previous trace and the field stays current state rather than a log. '
-      + 'Split each trace in two: `title` is what every peer pays for on every step and must let them decide whether to look closer; `detail` is the evidence, the commands, the exact paths — it is only read on request. '
+      'Write or replace one trace in the shared field that the other agents in this session read before each of their steps. '
+      + 'Use it to publish a decision, a finding, a claim on a file, a handoff, or a blocker instead of messaging: the trace reaches them on their own next step, with no sender, no recipient, and no relay. '
+      + '`key` names the trace, so writing the same key replaces the previous one and the field stays current state rather than a log. '
+      + 'Split each trace in two: `title` is what every agent pays for on every step and must let them decide whether to look closer; `detail` is the evidence — the commands, the exact paths — and is read only on request. '
       + 'Write the title for someone deciding whether they need the detail, not as a summary of it.',
     parameters: {
       type: 'object',
@@ -629,11 +629,11 @@ export function apply(ctx, config) {
       properties: {
         key: {
           type: 'string',
-          description: 'Stable slot id a peer can name again, such as `auth/schema` or `parse/csv`. Writing it again replaces the trace.',
+          description: 'Stable trace key the other agents can name again, such as `auth/schema` or `parse/csv`. Writing it again replaces the trace.',
         },
         title: {
           type: 'string',
-          description: `One line, at most ${TITLE_LIMIT} characters: the fact, the decision, or the next step, phrased so a peer can tell whether it concerns them. This is all they see by default.`,
+          description: `One line, at most ${TITLE_LIMIT} characters: the fact, the decision, or the next step, phrased so another agent can tell whether it concerns them. This is all they see by default.`,
         },
         detail: {
           type: 'string',
@@ -646,7 +646,7 @@ export function apply(ctx, config) {
         },
         author: {
           type: 'string',
-          description: 'Override the name peers attribute the trace to. By default it is your Team member name, or the label your parent gave this delegation; a session id suffix is only the last resort.',
+          description: 'Override the name other agents attribute the trace to. By default it is your Team member name, or the label your parent gave this subagent; a session id suffix is only the last resort.',
         },
         ttl_minutes: {
           type: 'integer',
@@ -660,8 +660,8 @@ export function apply(ctx, config) {
     execute: async (args, exec) => {
       const agent = exec?.agent
       if (agent === undefined) throw new Error(`${LEAVE} requires an owning agent session`)
-      const colony = field.colonyOf(agent)
-      if (colony === undefined) throw new Error(`${LEAVE} cannot resolve this agent's delegation tree`)
+      const scope = field.scopeKeyOf(agent)
+      if (scope === undefined) throw new Error(`${LEAVE} cannot resolve this agent's field`)
 
       const identity = await field.identify(agent)
       const key = traceKey(args?.key)
@@ -671,7 +671,7 @@ export function apply(ctx, config) {
       const detail = typeof args?.detail === 'string' ? args.detail.trim() : ''
       if (detail.length > DETAIL_LIMIT) throw new Error(`\`detail\` must be at most ${DETAIL_LIMIT} characters`)
       // Reject an unknown kind instead of quietly storing `note`: the field is
-      // shared state, so what a caller believes it wrote must be what peers read.
+      // shared state, so what a caller believes it wrote must be what others read.
       const kind = args?.kind === undefined ? 'note' : args.kind
       if (!KINDS.includes(kind)) throw new Error(`\`kind\` must be one of: ${KINDS.join(', ')}`)
       const author = typeof args?.author === 'string' && args.author.trim().length > 0
@@ -684,7 +684,7 @@ export function apply(ctx, config) {
         ttlMinutes = integer(requested, options.defaultTtlMinutes, 0, 10080)
       }
 
-      const trace = field.put(colony, {
+      const trace = field.put(scope, {
         key,
         title,
         detail,
@@ -694,18 +694,18 @@ export function apply(ctx, config) {
         from: agent.id,
         ttlMinutes,
       })
-      const total = field.list(colony).length
-      const mine = field.list(colony).filter((entry) => entry.from === agent.id).length
+      const total = field.list(scope).length
+      const mine = field.list(scope).filter((entry) => entry.from === agent.id).length
       const hasDetail = detail.length === 0 ? 'no detail' : `${detail.length} characters of detail`
       return `Left trace \`${key}\` as ${author} (${identity.role}), ${kind}, rev ${trace.rev}, ${hasDetail}; the field now holds ${total} trace${total === 1 ? '' : 's'}, ${mine} of them yours. `
-        + 'Peers see the title on their next step without any message; they read the detail only if they ask for it.'
+        + 'Other agents see the title on their next step without any message; they read the detail only if they ask for it.'
     },
   })
 
   const read = textTool({
     name: READ,
     description:
-      'Read the shared field of this delegation tree, or the detail behind one or more traces. '
+      'Read the shared field, or the detail behind one or more traces. '
       + `Every title is already in your runtime context before each step; call this when a title is cut short, when the trace you need has fallen outside the summary, or when you want the evidence behind a title before acting on it.`,
     parameters: {
       type: 'object',
@@ -714,7 +714,7 @@ export function apply(ctx, config) {
         keys: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Slots whose detail to read; omit to read the whole field.',
+          description: 'Trace keys whose detail to read; omit to read the whole field.',
         },
       },
     },
@@ -743,7 +743,7 @@ export function apply(ctx, config) {
       properties: {
         key: {
           type: 'string',
-          description: 'The exact slot to remove.',
+          description: 'The exact trace key to remove.',
         },
       },
     },
@@ -753,11 +753,11 @@ export function apply(ctx, config) {
     execute(args, exec) {
       const agent = exec?.agent
       if (agent === undefined) throw new Error(`${CLEAR} requires an owning agent session`)
-      const colony = field.colonyOf(agent)
-      if (colony === undefined) throw new Error(`${CLEAR} cannot resolve this agent's delegation tree`)
+      const scope = field.scopeKeyOf(agent)
+      if (scope === undefined) throw new Error(`${CLEAR} cannot resolve this agent's field`)
       const key = traceKey(args?.key)
-      const removed = field.remove(colony, key)
-      const total = field.list(colony).length
+      const removed = field.remove(scope, key)
+      const total = field.list(scope).length
       return removed
         ? `Retracted trace \`${key}\`; the field now holds ${total} trace${total === 1 ? '' : 's'}.`
         : `No trace named \`${key}\`; nothing changed. The field holds ${total} trace${total === 1 ? '' : 's'}.`

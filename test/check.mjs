@@ -53,7 +53,7 @@ const clear = tools.get('stigmergy_clear')
 assert.ok(leave && read && clear, 'three tools registered')
 assert.deepEqual(leave.output.schema, { type: 'string' })
 
-// --- the split: peers pay for the title, the detail costs nothing ----------
+// --- the split: agents pay for the title, the detail costs nothing ----------
 const left = await leave.execute({
   key: 'auth/schema',
   title: 'Columns are snake_case; migration lives in db/0042.sql',
@@ -69,9 +69,9 @@ assert.doesNotMatch(parentView, /db\/0042\.sql\. Evidence/, 'the detail does not
 assert.match(parentView, /you are ot0001/)
 
 const grandView = contexts[0].text({ agent: grandAgent, scope: grandAgent })
-assert.match(grandView, /snake_case/, 'a grandchild shares the tree field')
+assert.match(grandView, /snake_case/, 'a grandchild shares the field')
 
-assert.equal(contexts[0].text({ agent: otherAgent, scope: otherAgent }), '', 'an unrelated tree sees nothing')
+assert.equal(contexts[0].text({ agent: otherAgent, scope: otherAgent }), '', 'another session sees nothing')
 
 // --- read is what fetches the detail --------------------------------------
 const whole = await read.execute({}, { agent: childAgent })
@@ -80,11 +80,11 @@ assert.match(whole, /Renamed 14 columns/, 'read returns the detail')
 assert.match(whole, /1 of 1 traces/)
 assert.match(whole, /rev 1/)
 
-// --- replacement keeps one slot, bumps rev --------------------------------
+// --- replacement keeps one trace, bumps rev -------------------------------
 await leave.execute({ key: 'auth/schema', title: 'Revised: camelCase, see db/0043.sql' }, { agent: rootAgent })
 const replaced = await read.execute({}, { agent: childAgent })
 assert.match(replaced, /rev 2/)
-assert.doesNotMatch(replaced, /snake_case/, 'the slot was replaced')
+assert.doesNotMatch(replaced, /snake_case/, 'the trace was replaced')
 assert.doesNotMatch(replaced, /db\/0042\.sql\. Evidence/, 'the old detail is gone with the old trace')
 
 // --- bounds are enforced instead of silently rewritten --------------------
@@ -122,7 +122,7 @@ assert.doesNotMatch(await read.execute({}, { agent: rootAgent }), /ephemeral/)
 
 // --- persistence: the mirror carries both halves --------------------------
 const files = fs.readdirSync(path.join(root, '.dsh-stigmergy'))
-assert.equal(files.length, 1, 'one mirror per colony')
+assert.equal(files.length, 1, 'one mirror per field')
 const mirrorPath = path.join(root, '.dsh-stigmergy', files[0])
 const mirror = fs.readFileSync(mirrorPath, 'utf8')
 assert.match(mirror, /"title":"Revised: camelCase/)
@@ -166,7 +166,7 @@ assert.match(
 // --- config normalization -------------------------------------------------
 const options = normalizeConfig({ maxEntries: '2', scope: 'nonsense', defaultTtlMinutes: -5 })
 assert.equal(options.maxEntries, 2)
-assert.equal(options.scope, 'tree')
+assert.equal(options.scope, 'session')
 assert.equal(options.defaultTtlMinutes, 0)
 assert.equal(normalizeConfig(undefined).directory, '.dsh-stigmergy')
 
