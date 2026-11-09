@@ -1,6 +1,6 @@
 /**
- * Scratch harness for dsh-stigmergy: exercises the plugin through a fake
- * Cordis context (no DSH runtime needed). Not part of the package.
+ * Regression harness for dsh-stigmergy: exercises the plugin through a fake
+ * Cordis context (no DSH runtime needed). Not part of the published files.
  */
 import fs from 'node:fs'
 import os from 'node:os'
@@ -27,114 +27,126 @@ const childAgent = { id: childSession.id, session: childSession }
 const grandAgent = { id: grandSession.id, session: grandSession }
 const otherAgent = { id: otherSession.id, session: otherSession }
 
-const tools = new Map()
-const sections = []
-const contexts = []
-const ctx = {
-  tools: {
-    register: (definition) => { tools.set(definition.name, definition); return () => {} },
-    get: (name) => tools.get(name),
-  },
-  systemPrompt: {
-    section: (section) => { sections.push(section); return () => {} },
-    context: (context) => { contexts.push(context); return () => {} },
-  },
-  get: (name) => (name === 'sessions' ? { get: (id) => sessions.get(id) } : undefined),
-  logger: { warn: (message) => console.warn('[warn]', message) },
+function fakeContext(tools, contexts, sections = []) {
+  return {
+    tools: {
+      register: (definition) => { tools.set(definition.name, definition); return () => {} },
+      get: (name) => tools.get(name),
+    },
+    systemPrompt: {
+      section: (section) => { sections.push(section); return () => {} },
+      context: (context) => { contexts.push(context); return () => {} },
+    },
+    get: (name) => (name === 'sessions' ? { get: (id) => sessions.get(id) } : undefined),
+    logger: { warn: (message) => console.warn('[warn]', message) },
+  }
 }
 
-apply(ctx, {})
+const tools = new Map()
+const contexts = []
+const sections = []
+apply(fakeContext(tools, contexts, sections), {})
 
 const leave = tools.get('stigmergy_leave')
 const read = tools.get('stigmergy_read')
 const clear = tools.get('stigmergy_clear')
 assert.ok(leave && read && clear, 'three tools registered')
-
-// --- a trace from a child is visible to the parent and to a grandchild -----
-const left = await leave.execute(
-  { key: 'auth/schema', text: 'Use snake_case columns; migration in db/0042.sql', kind: 'decision' },
-  { agent: childAgent },
-)
-assert.match(left, /auth\/schema/)
-assert.match(left, /field now holds 1 trace/)
 assert.deepEqual(leave.output.schema, { type: 'string' })
 
+// --- the split: peers pay for the title, the detail costs nothing ----------
+const left = await leave.execute({
+  key: 'auth/schema',
+  title: 'Columns are snake_case; migration lives in db/0042.sql',
+  detail: 'Renamed 14 columns in db/0042.sql. Evidence: 3 failing tests in test/auth.spec.ts; run `pnpm test auth` to confirm.',
+  kind: 'decision',
+}, { agent: childAgent })
+assert.match(left, /auth\/schema/)
+assert.match(left, /field now holds 1 trace/)
+
 const parentView = contexts[0].text({ agent: rootAgent, scope: rootAgent })
-assert.match(parentView, /auth\/schema/)
-assert.match(parentView, /snake_case/)
+assert.match(parentView, /snake_case/, 'the title reaches the parent')
+assert.doesNotMatch(parentView, /db\/0042\.sql\. Evidence/, 'the detail does not')
 assert.match(parentView, /you are ot0001/)
 
 const grandView = contexts[0].text({ agent: grandAgent, scope: grandAgent })
-assert.match(grandView, /auth\/schema/, 'a grandchild shares the tree field')
+assert.match(grandView, /snake_case/, 'a grandchild shares the tree field')
 
-const otherView = contexts[0].text({ agent: otherAgent, scope: otherAgent })
-assert.equal(otherView, '', 'an unrelated tree sees nothing')
+assert.equal(contexts[0].text({ agent: otherAgent, scope: otherAgent }), '', 'an unrelated tree sees nothing')
+
+// --- read is what fetches the detail --------------------------------------
+const whole = await read.execute({}, { agent: childAgent })
+assert.match(whole, /Columns are snake_case/)
+assert.match(whole, /Renamed 14 columns/, 'read returns the detail')
+assert.match(whole, /1 of 1 traces/)
+assert.match(whole, /rev 1/)
 
 // --- replacement keeps one slot, bumps rev --------------------------------
-await leave.execute({ key: 'auth/schema', text: 'Revised: camelCase, see db/0043.sql' }, { agent: rootAgent })
-const field = await read.execute({}, { agent: childAgent })
-assert.match(field, /1 of 1 traces/)
-assert.match(field, /rev 2/)
-assert.doesNotMatch(field, /snake_case/, 'the slot was replaced')
+await leave.execute({ key: 'auth/schema', title: 'Revised: camelCase, see db/0043.sql' }, { agent: rootAgent })
+const replaced = await read.execute({}, { agent: childAgent })
+assert.match(replaced, /rev 2/)
+assert.doesNotMatch(replaced, /snake_case/, 'the slot was replaced')
+assert.doesNotMatch(replaced, /db\/0042\.sql\. Evidence/, 'the old detail is gone with the old trace')
 
-// --- truncation in the summary, full text in read -------------------------
-const long = 'x'.repeat(600)
-await leave.execute({ key: 'long', text: long }, { agent: childAgent })
-const clipped = contexts[0].text({ agent: rootAgent, scope: rootAgent })
-assert.match(clipped, /…/, 'summary truncates')
-assert.ok(clipped.length < 1600, 'summary stays bounded')
-const full = await read.execute({ keys: ['long'] }, { agent: rootAgent })
-assert.ok(full.includes('x'.repeat(600)), 'read returns the untruncated text')
-
-// --- evaporation ----------------------------------------------------------
-await leave.execute({ key: 'ephemeral', text: 'gone soon', ttl_minutes: 0 }, { agent: childAgent })
-const before = await read.execute({}, { agent: rootAgent })
-assert.match(before, /ephemeral/)
-await clear.execute({ key: 'ephemeral' }, { agent: rootAgent })
-const after = await read.execute({}, { agent: rootAgent })
-assert.doesNotMatch(after, /ephemeral/)
-
-// --- an unknown kind fails instead of being silently rewritten ------------
+// --- bounds are enforced instead of silently rewritten --------------------
 assert.throws(
-  () => leave.execute({ key: 'bad', text: 'x', kind: 'claim' }, { agent: childAgent }),
+  () => leave.execute({ key: 'bad', title: 'x'.repeat(161) }, { agent: childAgent }),
+  /`title` must be at most 160 characters/,
+)
+assert.throws(
+  () => leave.execute({ key: 'bad', title: 'ok', detail: 'y'.repeat(4001) }, { agent: childAgent }),
+  /`detail` must be at most 4000 characters/,
+)
+assert.throws(
+  () => leave.execute({ key: 'bad', title: '   ' }, { agent: childAgent }),
+  /`title` must be a non-empty string/,
+)
+assert.throws(
+  () => leave.execute({ key: 'bad', title: 'x', kind: 'claim' }, { agent: childAgent }),
   /`kind` must be one of/,
 )
 assert.doesNotMatch(await read.execute({}, { agent: rootAgent }), /bad/, 'a rejected write leaves no trace')
 
 // --- a numeric string TTL is accepted and normalized ----------------------
-await leave.execute({ key: 'ttl', text: 'short lived', ttl_minutes: '1' }, { agent: childAgent })
+await leave.execute({ key: 'ttl', title: 'Short lived', ttl_minutes: '1' }, { agent: childAgent })
 assert.match(await read.execute({ keys: ['ttl'] }, { agent: rootAgent }), /expires in 1m/)
 assert.throws(
-  () => leave.execute({ key: 'ttl', text: 'x', ttl_minutes: 'soon' }, { agent: childAgent }),
+  () => leave.execute({ key: 'ttl', title: 'x', ttl_minutes: 'soon' }, { agent: childAgent }),
   /`ttl_minutes` must be a number/,
 )
 
-// --- persistence: a fresh instance replays the mirror ---------------------
+// --- retraction -----------------------------------------------------------
+await leave.execute({ key: 'ephemeral', title: 'Gone soon', ttl_minutes: 0 }, { agent: childAgent })
+assert.match(await read.execute({}, { agent: rootAgent }), /ephemeral/)
+await clear.execute({ key: 'ephemeral' }, { agent: rootAgent })
+assert.doesNotMatch(await read.execute({}, { agent: rootAgent }), /ephemeral/)
+
+// --- persistence: the mirror carries both halves --------------------------
 const files = fs.readdirSync(path.join(root, '.dsh-stigmergy'))
 assert.equal(files.length, 1, 'one mirror per colony')
-const mirror = fs.readFileSync(path.join(root, '.dsh-stigmergy', files[0]), 'utf8')
-assert.match(mirror, /auth\/schema/)
+const mirrorPath = path.join(root, '.dsh-stigmergy', files[0])
+const mirror = fs.readFileSync(mirrorPath, 'utf8')
+assert.match(mirror, /"title":"Revised: camelCase/)
+assert.match(mirror, /"detail":/)
+assert.doesNotMatch(mirror, /"text":/, 'new records no longer store a single text')
 
 const tools2 = new Map()
 const contexts2 = []
-const ctx2 = {
-  tools: { register: (definition) => { tools2.set(definition.name, definition); return () => {} }, get: (name) => tools2.get(name) },
-  systemPrompt: { section: () => () => {}, context: (context) => { contexts2.push(context); return () => {} } },
-  get: (name) => (name === 'sessions' ? { get: (id) => sessions.get(id) } : undefined),
-  logger: { warn: console.warn },
-}
-apply(ctx2, {})
-const replayed = contexts2[0].text({ agent: rootAgent, scope: rootAgent })
-assert.match(replayed, /Revised: camelCase/, 'state survives a restart')
+apply(fakeContext(tools2, contexts2), {})
+assert.match(
+  contexts2[0].text({ agent: rootAgent, scope: rootAgent }),
+  /Revised: camelCase/,
+  'state survives a restart',
+)
 
-// --- external edit is adopted --------------------------------------------
-const mirrorPath = path.join(root, '.dsh-stigmergy', files[0])
+// --- a trace written by an older version still loads ----------------------
 fs.appendFileSync(mirrorPath, `${JSON.stringify({ v: 1, op: 'put', trace: {
-  key: 'from-shell', text: 'written by an ordinary tool', kind: 'note', author: 'shell',
-  from: 'session-shell', createdAt: Date.now(), updatedAt: Date.now(), rev: 1, expiresAt: null,
+  key: 'legacy', text: 'Written before the title/detail split', kind: 'note', author: 'old',
+  from: 'session-old', createdAt: Date.now(), updatedAt: Date.now(), rev: 1, expiresAt: null,
 } })}\n`)
 const adopted = contexts2[0].text({ agent: rootAgent, scope: rootAgent })
-assert.match(adopted, /from-shell/, 'an external append is picked up')
+assert.match(adopted, /legacy/, 'a legacy record is adopted from the mirror')
+assert.match(await tools2.get('stigmergy_read').execute({ keys: ['legacy'] }, { agent: rootAgent }),
+  /Written before the title\/detail split/, 'the legacy text becomes both halves')
 
 // --- config normalization -------------------------------------------------
 const options = normalizeConfig({ maxEntries: '2', scope: 'nonsense', defaultTtlMinutes: -5 })
@@ -143,7 +155,7 @@ assert.equal(options.scope, 'tree')
 assert.equal(options.defaultTtlMinutes, 0)
 assert.equal(normalizeConfig(undefined).directory, '.dsh-stigmergy')
 
-// --- prompt section and field context are registered ----------------------
+// --- the protocol section is registered and gated on tool visibility ------
 assert.equal(sections.length, 1)
 assert.match(sections[0].text({ scope: rootAgent }), /stigmergic/)
 assert.equal(contexts.length, 1)

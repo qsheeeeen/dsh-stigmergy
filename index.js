@@ -43,6 +43,13 @@ const CLEAR = 'stigmergy_clear'
 /** The trace kinds a caller may claim. Free text would drift; a closed set keeps the field readable. */
 const KINDS = ['note', 'decision', 'finding', 'task', 'question', 'done']
 
+/**
+ * Bounds for the two halves of a trace. Every peer pays for the title on every
+ * step, so it is short by contract; the detail is paid only on request.
+ */
+const TITLE_LIMIT = 160
+const DETAIL_LIMIT = 4000
+
 /** Where the field sits among runtime contexts: after delegation facts, before harness source. */
 const FIELD_CONTEXT_ORDER = 150
 
@@ -150,16 +157,30 @@ function normalizeConfig(raw) {
 }
 
 /**
- * Whether a value read back from disk is a trace this version understands.
+ * Normalize a trace read back from disk. A mirror written before the
+ * title/detail split carries one `text`; it loads as a title plus a detail, so
+ * an upgrade never drops a trace that is still in its lifetime.
  * @param value - a parsed JSONL record payload.
- * @returns whether it carries the required fields.
+ * @returns the trace, or undefined when the record is not one.
  */
-function isTrace(value) {
-  return value !== null
-    && typeof value === 'object'
-    && typeof value.key === 'string'
-    && typeof value.text === 'string'
-    && typeof value.updatedAt === 'number'
+function readTrace(value) {
+  if (value === null || typeof value !== 'object') return undefined
+  if (typeof value.key !== 'string' || typeof value.updatedAt !== 'number') return undefined
+  const legacy = typeof value.text === 'string' ? value.text : undefined
+  const title = typeof value.title === 'string' ? value.title : legacy === undefined ? undefined : oneLine(legacy)
+  if (title === undefined) return undefined
+  return {
+    key: value.key,
+    title,
+    detail: typeof value.detail === 'string' ? value.detail : legacy ?? '',
+    kind: value.kind,
+    author: value.author,
+    from: value.from,
+    createdAt: value.createdAt,
+    updatedAt: value.updatedAt,
+    rev: value.rev,
+    expiresAt: value.expiresAt,
+  }
 }
 
 /**
@@ -245,7 +266,7 @@ class Field {
     const file = directory !== '' && typeof workspace === 'string' && workspace.length > 0
       ? path.join(workspace, directory, `${key.replace(/[^A-Za-z0-9._-]/g, '_')}.jsonl`)
       : undefined
-    return { key, file, entries: new Map(), loaded: false, mtimeMs: 0, appends: 0 }
+    return { key, file, entries: new Map(), loaded: false, mtimeMs: 0, size: -1, appends: 0 }
   }
 
   /**
@@ -269,7 +290,9 @@ class Field {
       if (error?.code === 'ENOENT') state.loaded = true
       return state
     }
-    if (state.loaded && stat.mtimeMs === state.mtimeMs) return state
+    // Windows can append without moving the timestamp forward, so size is part
+    // of the freshness test; either changing means the file changed underneath.
+    if (state.loaded && stat.mtimeMs === state.mtimeMs && stat.size === state.size) return state
 
     try {
       const text = fs.readFileSync(state.file, 'utf8')
@@ -283,11 +306,15 @@ class Field {
           continue
         }
         if (record?.op === 'del' && typeof record.key === 'string') entries.delete(record.key)
-        else if (record?.op === 'put' && isTrace(record.trace)) entries.set(record.trace.key, record.trace)
+        else if (record?.op === 'put') {
+          const trace = readTrace(record.trace)
+          if (trace !== undefined) entries.set(trace.key, trace)
+        }
       }
       state.entries = entries
       state.loaded = true
       state.mtimeMs = stat.mtimeMs
+      state.size = stat.size
     } catch (error) {
       this.#ctx.logger?.warn?.(`stigmergy: cannot read field mirror (${String(error)})`)
     }
@@ -325,7 +352,8 @@ class Field {
     const ttl = input.ttlMinutes
     const trace = {
       key: input.key,
-      text: input.text,
+      title: input.title,
+      detail: input.detail,
       kind: input.kind,
       author: input.author,
       from: String(input.from ?? ''),
@@ -365,7 +393,9 @@ class Field {
       fs.appendFileSync(state.file, `${JSON.stringify(record)}\n`, 'utf8')
       state.loaded = true
       state.appends += 1
-      state.mtimeMs = fs.statSync(state.file).mtimeMs
+      const written = fs.statSync(state.file)
+      state.mtimeMs = written.mtimeMs
+      state.size = written.size
       if (state.appends >= 200) this.#compact(state)
     } catch (error) {
       state.appends = 0
@@ -383,7 +413,9 @@ class Field {
       const lines = this.list(state.key).map((trace) => JSON.stringify({ v: 1, op: 'put', trace }))
       fs.writeFileSync(state.file, lines.length === 0 ? '' : `${lines.join('\n')}\n`, 'utf8')
       state.appends = 0
-      state.mtimeMs = fs.statSync(state.file).mtimeMs
+      const written = fs.statSync(state.file)
+      state.mtimeMs = written.mtimeMs
+      state.size = written.size
     } catch (error) {
       this.#ctx.logger?.warn?.(`stigmergy: cannot compact field mirror (${String(error)})`)
     }
@@ -405,12 +437,12 @@ class Field {
     const hidden = traces.length - shown.length
     const self = shortId(agent?.id)
     const lines = shown.map((trace) => {
-      const text = clip(oneLine(trace.text), this.#options.maxTextChars)
-      return `- [${trace.kind}] ${trace.key} · ${trace.author} · ${ago(trace.updatedAt)} — ${text}`
+      const title = clip(oneLine(trace.title), this.#options.maxTextChars)
+      return `- [${trace.kind}] ${trace.key} · ${trace.author} · ${ago(trace.updatedAt)} — ${title}`
     })
     const head = `Shared field (stigmergy): ${traces.length} trace${traces.length === 1 ? '' : 's'}; you are ${self}. `
       + `Peers pick up a change on their next step — nothing is sent as a message. `
-      + `Write or replace one with \`${LEAVE}\`; \`${READ}\` returns full text.`
+      + `Write or replace one with \`${LEAVE}\`; \`${READ}\` returns the detail behind a title.`
     return hidden === 0
       ? [head, '', ...lines].join('\n')
       : [head, '', ...lines, `- ${hidden} more not shown; \`${READ}\` lists the whole field.`].join('\n')
@@ -441,10 +473,13 @@ class Field {
       const expiry = typeof trace.expiresAt === 'number'
         ? `expires in ${Math.max(0, Math.round((trace.expiresAt - Date.now()) / 60_000))}m`
         : 'does not evaporate'
+      const body = trace.detail.trim().length === 0
+        ? []
+        : ['', ...trace.detail.split('\n').map((line) => `  ${line}`)]
       return [
-        `[${trace.kind}] ${trace.key}`,
+        `[${trace.kind}] ${trace.key} — ${oneLine(trace.title)}`,
         `  from ${trace.author}, updated ${ago(trace.updatedAt)} ago, rev ${trace.rev}, ${expiry}`,
-        ...trace.text.split('\n').map((line) => `  ${line}`),
+        ...body,
       ].join('\n')
     })
     const hidden = traces.length - selected.length
@@ -502,20 +537,25 @@ export function apply(ctx, config) {
     description:
       'Write or replace one trace in the shared field that every agent in this delegation tree reads before each of its steps. '
       + 'Use it to publish a decision, a finding, a claim on a file, a handoff, or a blocker instead of messaging a peer: the trace reaches them on their own next step, with no sender, no recipient, and no relay. '
-      + '`key` names the slot, so writing the same key replaces the previous text and the field stays current state rather than a log. '
-      + 'Keep `text` dense: peers re-read the whole field on every step, so write only what changes their next action.',
+      + '`key` names the slot, so writing the same key replaces the previous trace and the field stays current state rather than a log. '
+      + 'Split each trace in two: `title` is what every peer pays for on every step and must let them decide whether to look closer; `detail` is the evidence, the commands, the exact paths — it is only read on request. '
+      + 'Write the title for someone deciding whether they need the detail, not as a summary of it.',
     parameters: {
       type: 'object',
       additionalProperties: false,
-      required: ['key', 'text'],
+      required: ['key', 'title'],
       properties: {
         key: {
           type: 'string',
           description: 'Stable slot id a peer can name again, such as `auth/schema` or `parse/csv`. Writing it again replaces the trace.',
         },
-        text: {
+        title: {
           type: 'string',
-          description: 'What peers must know to act, in one to three sentences. Not a status report: the fact, the decision, or the next step.',
+          description: `One line, at most ${TITLE_LIMIT} characters: the fact, the decision, or the next step, phrased so a peer can tell whether it concerns them. This is all they see by default.`,
+        },
+        detail: {
+          type: 'string',
+          description: `The evidence behind the title: paths, commands, numbers, caveats. Only read when someone asks for it. At most ${DETAIL_LIMIT} characters; omit when the title says everything.`,
         },
         kind: {
           type: 'string',
@@ -542,8 +582,11 @@ export function apply(ctx, config) {
       if (colony === undefined) throw new Error(`${LEAVE} cannot resolve this agent's delegation tree`)
 
       const key = traceKey(args?.key)
-      const text = typeof args?.text === 'string' ? args.text.trim() : ''
-      if (text.length === 0) throw new Error('`text` must be a non-empty string')
+      const title = typeof args?.title === 'string' ? oneLine(args.title) : ''
+      if (title.length === 0) throw new Error('`title` must be a non-empty string')
+      if (title.length > TITLE_LIMIT) throw new Error(`\`title\` must be at most ${TITLE_LIMIT} characters; move the rest into \`detail\``)
+      const detail = typeof args?.detail === 'string' ? args.detail.trim() : ''
+      if (detail.length > DETAIL_LIMIT) throw new Error(`\`detail\` must be at most ${DETAIL_LIMIT} characters`)
       // Reject an unknown kind instead of quietly storing `note`: the field is
       // shared state, so what a caller believes it wrote must be what peers read.
       const kind = args?.kind === undefined ? 'note' : args.kind
@@ -560,7 +603,8 @@ export function apply(ctx, config) {
 
       const trace = field.put(colony, {
         key,
-        text: text.slice(0, 4000),
+        title,
+        detail,
         kind,
         author,
         from: agent.id,
@@ -568,16 +612,17 @@ export function apply(ctx, config) {
       })
       const total = field.list(colony).length
       const mine = field.list(colony).filter((entry) => entry.from === agent.id).length
-      return `Left trace \`${key}\` (${kind}, rev ${trace.rev}); the field now holds ${total} trace${total === 1 ? '' : 's'}, ${mine} of them yours. `
-        + 'Peers see it on their next step without any message.'
+      const hasDetail = detail.length === 0 ? 'no detail' : `${detail.length} characters of detail`
+      return `Left trace \`${key}\` (${kind}, rev ${trace.rev}, ${hasDetail}); the field now holds ${total} trace${total === 1 ? '' : 's'}, ${mine} of them yours. `
+        + 'Peers see the title on their next step without any message; they read the detail only if they ask for it.'
     },
   })
 
   const read = textTool({
     name: READ,
     description:
-      'Read the shared field of this delegation tree, or the full text of named traces. '
-      + `The field is already summarized in your runtime context before every step; call this when a summary was truncated, when a trace you need has fallen outside the summary, or when you want to check the field before redoing work someone else may have started.`,
+      'Read the shared field of this delegation tree, or the detail behind one or more traces. '
+      + `Every title is already in your runtime context before each step; call this when a title is cut short, when the trace you need has fallen outside the summary, or when you want the evidence behind a title before acting on it.`,
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -585,7 +630,7 @@ export function apply(ctx, config) {
         keys: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Slots to read in full; omit to read the whole field.',
+          description: 'Slots whose detail to read; omit to read the whole field.',
         },
       },
     },

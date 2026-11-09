@@ -13,6 +13,7 @@ This plugin gives one delegation tree — the main agent plus every subagent it 
 - every agent sees the current field in its runtime context before every step, bounded and evaporating;
 - a trace one agent leaves is already in a peer's next step: no `send_message`, no parent relaying, no N² message graph;
 - a trace is a slot identified by `key`, so writing it again replaces it and the field stays current state rather than a chat log;
+- each trace is split in two: a short `title` every peer pays for on every step, and a `detail` paid only when someone asks for it;
 - traces evaporate (90 minutes by default), so stale information removes itself without anyone cleaning up.
 
 ## Install
@@ -27,16 +28,22 @@ Then in DSH, `plugin_manager` → `install_bundle` with the cloned directory as 
 
 | Tool | What it does |
 | --- | --- |
-| `stigmergy_leave` | Write or replace one trace: `key` (the slot), `text` (what a peer needs), `kind`, `author`, `ttl_minutes` |
-| `stigmergy_read` | Read the whole field, or the full text of named `keys` (the context snapshot is truncated) |
+| `stigmergy_leave` | Write or replace one trace: `key` (the slot), `title` (one line, ≤ 160 chars), `detail` (optional, ≤ 4000 chars), `kind`, `author`, `ttl_minutes` |
+| `stigmergy_read` | Read the detail behind one or more `keys`, or the whole field |
 | `stigmergy_clear` | Retract a trace before it evaporates |
 
 `kind` is one of `note`, `decision`, `finding`, `task`, `question`, `done`.
 
+### Why a title and a detail
+
+Write is cheap and read is not: every peer re-reads the field on every step. So the part that enters every step — the title — has to earn its place by letting a peer decide whether the trace concerns them at all. The evidence behind it — paths, commands, numbers, caveats — stays out of every step and is fetched only when a peer asks.
+
+A good title is not a summary of the detail. It is the one thing that changes a peer's next action if true.
+
 ## How it works
 
 1. **One field per colony.** With `scope: tree` (the default) the colony is the root session of the delegation tree, so a parent and all of its descendants share a field. With `scope: workspace` the working directory is the colony instead, and separate conversations in one project share a field.
-2. **Injection.** A `systemPrompt.context` renders the field into the runtime context while the request is assembled. DSH recomputes runtime context for every request, so the field is live rather than a snapshot taken at startup.
+2. **Injection.** A `systemPrompt.context` renders the field into the runtime context while the request is assembled — titles only. DSH recomputes runtime context for every request, so the field is live rather than a snapshot taken at startup.
 3. **Persistence.** The field is mirrored to `<cwd>/.dsh-stigmergy/<colony>.jsonl`. It survives a restart, ordinary `read` and `grep` can inspect it, and an edit made outside the plugin is adopted on the next read.
 4. **Evaporation.** `expiresAt` drops a trace out of the field; the mirror is compacted every 200 appends.
 
@@ -49,7 +56,7 @@ Then in DSH, `plugin_manager` → `install_bundle` with the cloned directory as 
 | `directory` | `.dsh-stigmergy` | Mirror directory, relative to the colony root's working directory; `""` keeps the field in memory only |
 | `scope` | `tree` | `tree` (one delegation tree) or `workspace` (one working directory) |
 | `maxEntries` | `12` | Most traces rendered into the context snapshot |
-| `maxTextChars` | `280` | Truncation length of each trace in the snapshot |
+| `maxTextChars` | `280` | Defensive cap on each title in the snapshot (titles are already ≤ 160) |
 | `defaultTtlMinutes` | `90` | Default evaporation time; `0` keeps a trace until it is replaced |
 | `promptSection` | `true` | Whether to add the standing coordination paragraph to the system prompt |
 
@@ -59,7 +66,7 @@ Then in DSH, `plugin_manager` → `install_bundle` with the cloned directory as 
 node test/check.mjs
 ```
 
-A regression check over a fake Cordis context. It covers: sharing inside a tree, isolation across trees, slot replacement, snapshot truncation, full reads, retraction, replay from the mirror, adoption of external edits, and config normalization.
+A regression check over a fake Cordis context. It covers: sharing inside a tree, isolation across trees, the title/detail split, slot replacement, enforced bounds, retraction, replay from the mirror, migration of an older record, adoption of external edits, and config normalization.
 
 Live records:
 
