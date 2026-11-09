@@ -1,78 +1,78 @@
 # Stigmergy for DeepSeek Harness
 
-**痕迹协作** —— 让一棵委派树里的 Agent 通过「改变环境、留下痕迹」来协作，而不是互相发消息。
+A shared trace field for a delegation tree: agents coordinate by changing a common environment instead of messaging each other.
 
-受生物学里的 *stigmergy*（痕迹协作）启发：蚂蚁从不告诉另一只蚂蚁食物在哪，它只是在路上留下信息素；后来的蚂蚁沿着痕迹自己走过去。信息在环境里，不在消息里。
+Inspired by biological stigmergy — an ant never tells another ant where the food is. It lays a pheromone trail, and any ant that later walks there simply follows it. The information lives in the environment, not in a message.
 
-## 它解决什么
+## Why
 
-多个 Agent 协作，最大的误区是把人类大厂那套「汇报、对齐、审批」搬给 AI。Agent 数量翻一倍，彼此通报的沟通量就翻四倍。真正的 AI Native 协作是：共享同一个鲜活的上下文环境，直接改状态、留痕迹、触发下一步。
+Multi-agent systems usually fail by copying the human org chart: report, align, approve. Double the agents and peer-to-peer chatter quadruples. AI-native coordination looks different: share one live context, change the state, leave a trace, let the next step react.
 
-这个插件给一棵委派树（主 Agent + 它启动的所有 subagent，含多层）一片共享的**痕迹场**：
+This plugin gives one delegation tree — the main agent plus every subagent it starts, at any depth — a shared trace field:
 
-- 每个 Agent 在**每一步**开始前，都会在自己的 runtime context 里看到当前痕迹场（有界、自动蒸发）；
-- 所以 A 留下的痕迹，B 在**自己的下一步**就能看到——没有 `send_message`，没有主 Agent 转述，没有 N² 的消息图；
-- 痕迹按 `key` 覆盖，所以痕迹场是**当前状态**，不是聊天记录；
-- 痕迹会**蒸发**（默认 90 分钟），过期的信息自己消失，不需要谁来清理。
+- every agent sees the current field in its runtime context before every step, bounded and evaporating;
+- a trace one agent leaves is already in a peer's next step: no `send_message`, no parent relaying, no N² message graph;
+- a trace is a slot identified by `key`, so writing it again replaces it and the field stays current state rather than a chat log;
+- traces evaporate (90 minutes by default), so stale information removes itself without anyone cleaning up.
 
-## 安装
+## Install
 
 ```powershell
 git clone https://github.com/qsheeeeen/dsh-stigmergy
 ```
 
-然后在 DSH 里 `plugin_manager` → `install_bundle`，target 指向 clone 下来的目录（或用 Creator 模式安装），重启 DSH 即生效。
+Then in DSH, `plugin_manager` → `install_bundle` with the cloned directory as target (or install it from Creator mode), and restart DSH.
 
+## Tools
 
-## 工具
-
-| 工具 | 作用 |
+| Tool | What it does |
 | --- | --- |
-| `stigmergy_leave` | 写/覆盖一条痕迹：`key`（槽位）、`text`（同伴需要的事实）、`kind`、`author`、`ttl_minutes` |
-| `stigmergy_read` | 读整片痕迹场，或按 `keys` 读全文（context 里的是截断摘要） |
-| `stigmergy_clear` | 在蒸发前收回一条痕迹 |
+| `stigmergy_leave` | Write or replace one trace: `key` (the slot), `text` (what a peer needs), `kind`, `author`, `ttl_minutes` |
+| `stigmergy_read` | Read the whole field, or the full text of named `keys` (the context snapshot is truncated) |
+| `stigmergy_clear` | Retract a trace before it evaporates |
 
-`kind` 取值：`note` · `decision` · `finding` · `task` · `question` · `done`。
+`kind` is one of `note`, `decision`, `finding`, `task`, `question`, `done`.
 
-## 怎么工作
+## How it works
 
-1. **痕迹场**按 colony 分组。默认 `scope: tree`，colony = 这棵委派树的根 session；`scope: workspace` 则整个工作目录共享一片场。
-2. **注入**：插件注册一个 `systemPrompt.context`，在每次请求组装时把痕迹场渲染进 runtime context。DSH 每次请求都会刷新 runtime context，所以这是「鲜活」的，不是启动时快照。
-3. **落盘**：痕迹同时以追加日志写到 `<cwd>/.dsh-stigmergy/<colony>.jsonl`，重启后还在，用普通 `read` / `grep` 也能看。外部修改会在下次读取时被采纳。
-4. **蒸发**：`expiresAt` 到期即从场里消失；日志超过 200 条会压缩一次。
+1. **One field per colony.** With `scope: tree` (the default) the colony is the root session of the delegation tree, so a parent and all of its descendants share a field. With `scope: workspace` the working directory is the colony instead, and separate conversations in one project share a field.
+2. **Injection.** A `systemPrompt.context` renders the field into the runtime context while the request is assembled. DSH recomputes runtime context for every request, so the field is live rather than a snapshot taken at startup.
+3. **Persistence.** The field is mirrored to `<cwd>/.dsh-stigmergy/<colony>.jsonl`. It survives a restart, ordinary `read` and `grep` can inspect it, and an edit made outside the plugin is adopted on the next read.
+4. **Evaporation.** `expiresAt` drops a trace out of the field; the mirror is compacted every 200 appends.
 
-## 配置
+## Configuration
 
-`cordis.patch.yml` 里的 `config`，可在你自己的 profile patch 层覆盖：
+`config` in `cordis.patch.yml`, overridable from your own profile patch layer:
 
-| 字段 | 默认 | 说明 |
+| Field | Default | Meaning |
 | --- | --- | --- |
-| `directory` | `.dsh-stigmergy` | 落盘目录（相对 colony 根的工作目录）；`""` 表示只留内存 |
-| `scope` | `tree` | `tree`（一棵委派树）或 `workspace`（一个工作目录） |
-| `maxEntries` | `12` | 注入 context 的最多痕迹条数 |
-| `maxTextChars` | `280` | 每条痕迹在摘要里的截断长度 |
-| `defaultTtlMinutes` | `90` | 默认蒸发时间；0 表示不蒸发 |
-| `promptSection` | `true` | 是否在系统提示里加一段协作约定 |
+| `directory` | `.dsh-stigmergy` | Mirror directory, relative to the colony root's working directory; `""` keeps the field in memory only |
+| `scope` | `tree` | `tree` (one delegation tree) or `workspace` (one working directory) |
+| `maxEntries` | `12` | Most traces rendered into the context snapshot |
+| `maxTextChars` | `280` | Truncation length of each trace in the snapshot |
+| `defaultTtlMinutes` | `90` | Default evaporation time; `0` keeps a trace until it is replaced |
+| `promptSection` | `true` | Whether to add the standing coordination paragraph to the system prompt |
 
-## 验证
+## Verification
 
 ```powershell
 node test/check.mjs
 ```
 
-假 Cordis context 的回归检查，覆盖：树内共享、外树隔离、同 key 覆盖、摘要截断、全文读取、收回、落盘重放、外部改写采纳、配置归一化。
+A regression check over a fake Cordis context. It covers: sharing inside a tree, isolation across trees, slot replacement, snapshot truncation, full reads, retraction, replay from the mirror, adoption of external edits, and config normalization.
 
-实测记录：
+Live records:
 
-1. 主 Agent 写入 `demo/handoff`；一个正在 `Start-Sleep` 的子 Agent，在等待后的下一步 runtime snapshot 里看到了这条痕迹——**没有调用 `stigmergy_read`，也没有收到任何消息**。
-2. 子 Agent 写入 `demo/decision`；主 Agent 下一步的 runtime context 里出现。
-3. 主 Agent 撤销 `demo/handoff`；子 Agent 最后一步看到的场里它已经消失。
+1. The parent wrote `demo/handoff`; a child sitting in `Start-Sleep` saw it in its next runtime snapshot — without calling `stigmergy_read` and without receiving any message.
+2. A child wrote `demo/decision`; it appeared in the parent's next runtime context.
+3. Two sibling subagents running in parallel each saw the other's trace after a 45-second wait, again without reading it.
+4. Retracting a trace removed it from another agent's next step.
 
-## 边界
+## Boundaries
 
-- 工具是**全局**注册的，preset 的既有作用域规则照常生效：若某个 preset 主动屏蔽了全局工具，该 preset 的 Agent 就看不到痕迹场；它派生的子 Agent 只要继承全局工具，仍然能看到。插件不认识、也不依赖任何具体 preset。
-- 痕迹是给「同一棵树里正在跑的 Agent」看的，不替代 subagent 的最终报告：报告仍然回到父 Agent，痕迹是**平级共享**的那一层。
-- 落盘用 Host 进程直接写文件，不受模型工具沙箱约束；写失败只会降级成内存态，不会让工具调用失败。
+- The tools are registered globally, and preset scoping still applies: a preset that masks global tools hides the field from that agent, while a child that inherits globals still sees it. The plugin knows nothing about, and depends on, no specific preset.
+- The field is for agents running in the same tree. It does not replace a subagent's final report, which still returns to its parent; the field is the peer-to-peer layer.
+- The mirror is written by the Host process directly, outside the model's tool sandbox. A failed write degrades the field to memory-only instead of failing the tool call.
 
 ## License
 
