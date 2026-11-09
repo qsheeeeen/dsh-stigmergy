@@ -138,15 +138,30 @@ assert.match(
   'state survives a restart',
 )
 
-// --- a trace written by an older version still loads ----------------------
+// --- the mirror shape is exact: a partial record is dropped, not repaired --
 fs.appendFileSync(mirrorPath, `${JSON.stringify({ v: 1, op: 'put', trace: {
-  key: 'legacy', text: 'Written before the title/detail split', kind: 'note', author: 'old',
-  from: 'session-old', createdAt: Date.now(), updatedAt: Date.now(), rev: 1, expiresAt: null,
+  key: 'partial', title: 'Half a trace', author: 'shell', from: 'session-shell',
+  createdAt: Date.now(), updatedAt: Date.now(), rev: 1, expiresAt: null,
+} })}\n`)
+assert.doesNotMatch(
+  contexts2[0].text({ agent: rootAgent, scope: rootAgent }),
+  /partial/,
+  'a record without detail and role is not a trace',
+)
+
+// --- an external writer with the full shape is adopted ---------------------
+fs.appendFileSync(mirrorPath, `${JSON.stringify({ v: 1, op: 'put', trace: {
+  key: 'from-shell', title: 'Written by an ordinary tool', detail: 'appended straight to the mirror',
+  kind: 'note', author: 'shell', role: 'subagent', from: 'session-shell',
+  createdAt: Date.now(), updatedAt: Date.now(), rev: 1, expiresAt: null,
 } })}\n`)
 const adopted = contexts2[0].text({ agent: rootAgent, scope: rootAgent })
-assert.match(adopted, /legacy/, 'a legacy record is adopted from the mirror')
-assert.match(await tools2.get('stigmergy_read').execute({ keys: ['legacy'] }, { agent: rootAgent }),
-  /Written before the title\/detail split/, 'the legacy text becomes both halves')
+assert.match(adopted, /from-shell/, 'a complete external record is adopted')
+assert.match(
+  await tools2.get('stigmergy_read').execute({ keys: ['from-shell'] }, { agent: rootAgent }),
+  /from shell \(subagent\)/,
+  'its detail and attribution survive',
+)
 
 // --- config normalization -------------------------------------------------
 const options = normalizeConfig({ maxEntries: '2', scope: 'nonsense', defaultTtlMinutes: -5 })

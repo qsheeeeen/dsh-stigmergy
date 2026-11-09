@@ -53,6 +53,15 @@ A good title is not a summary of the detail. It is the one thing that changes a 
 
    The raw id stays on the trace and appears in `read`, because that is what `list_agents` shows a parent. `author` can override the resolved name when a role matters more than a name.
 
+The mirror is append-only JSONL, one operation per line:
+
+```json
+{"v":1,"op":"put","trace":{"key":"auth/schema","title":"…","detail":"…","kind":"decision","author":"parser","role":"teammate","from":"session-…","createdAt":0,"updatedAt":0,"rev":1,"expiresAt":0}}
+{"v":1,"op":"del","key":"auth/schema"}
+```
+
+The shape is exact. A line missing any trace field is dropped rather than repaired, because a half-written record would otherwise enter a field that every peer reads on every step.
+
 ## Configuration
 
 `config` in `cordis.patch.yml`, overridable from your own profile patch layer:
@@ -72,7 +81,7 @@ A good title is not a summary of the detail. It is the one thing that changes a 
 node test/check.mjs
 ```
 
-A regression check over a fake Cordis context. It covers: sharing inside a tree, isolation across trees, the title/detail split, slot replacement, enforced bounds, retraction, replay from the mirror, migration of an older record, adoption of external edits, identity resolution in both coordination modes, and config normalization.
+A regression check over a fake Cordis context. It covers: sharing inside a tree, isolation across trees, the title/detail split, slot replacement, enforced bounds, retraction, replay from the mirror, rejection of a partial mirror record, adoption of a complete external one, identity resolution in both coordination modes, and config normalization.
 
 Live records:
 

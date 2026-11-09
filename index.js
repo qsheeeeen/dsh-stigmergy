@@ -157,26 +157,26 @@ function normalizeConfig(raw) {
 }
 
 /**
- * Normalize a trace read back from disk. A mirror written before the
- * title/detail split carries one `text`; it loads as a title plus a detail, so
- * an upgrade never drops a trace that is still in its lifetime.
+ * Parse one trace read back from the mirror. The shape is exact: a record that
+ * does not carry every required field is not a trace, and is dropped rather
+ * than repaired, because repairing would put a half-written line into a field
+ * that every peer reads on every step.
  * @param value - a parsed JSONL record payload.
  * @returns the trace, or undefined when the record is not one.
  */
 function readTrace(value) {
   if (value === null || typeof value !== 'object') return undefined
-  if (typeof value.key !== 'string' || typeof value.updatedAt !== 'number') return undefined
-  const legacy = typeof value.text === 'string' ? value.text : undefined
-  const title = typeof value.title === 'string' ? value.title : legacy === undefined ? undefined : oneLine(legacy)
-  if (title === undefined) return undefined
+  for (const field of ['key', 'title', 'detail', 'author', 'role', 'from']) {
+    if (typeof value[field] !== 'string') return undefined
+  }
+  if (typeof value.updatedAt !== 'number') return undefined
   return {
     key: value.key,
-    title,
-    detail: typeof value.detail === 'string' ? value.detail : legacy ?? '',
+    title: value.title,
+    detail: value.detail,
     kind: value.kind,
     author: value.author,
-    role: typeof value.role === 'string' ? value.role : 'unknown',
-    mode: typeof value.mode === 'string' ? value.mode : 'delegate',
+    role: value.role,
     from: value.from,
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
@@ -199,7 +199,7 @@ class Field {
   #states = new Map()
   /** agent id → colony key. @type {Map<string, string>} */
   #colonies = new Map()
-  /** agent id → resolved identity. @type {Map<string, {id: string, name: string, role: string, mode: string}>} */
+  /** agent id → resolved identity. @type {Map<string, {id: string, name: string, role: string}>} */
   #identities = new Map()
 
   /**
@@ -223,11 +223,11 @@ class Field {
    * never changes afterwards.
    *
    * @param agent - the agent about to write.
-   * @returns its identity: stable `id`, display `name`, `role`, and `mode`.
+   * @returns its identity: stable `id`, display `name`, and `role`.
    */
   async identify(agent) {
     const id = agent?.id
-    if (typeof id !== 'string') return { id: '', name: 'unknown', role: 'unknown', mode: 'none' }
+    if (typeof id !== 'string') throw new Error('cannot resolve an identity without an agent id')
     const cached = this.#identities.get(id)
     if (cached !== undefined) return cached
 
@@ -239,7 +239,7 @@ class Field {
       try {
         const membership = teams.tryMembership(agent)
         if (membership !== undefined) {
-          const identity = { id, name: String(membership.name), role: membership.role, mode: 'team' }
+          const identity = { id, name: String(membership.name), role: membership.role }
           this.#identities.set(id, identity)
           return identity
         }
@@ -255,7 +255,7 @@ class Field {
           const rows = await subagents.listChildren(parentId)
           const label = rows?.find?.((entry) => entry.id === id)?.label
           if (typeof label === 'string' && label.trim().length > 0) {
-            const identity = { id, name: label.trim().slice(0, 60), role: 'subagent', mode: 'delegate' }
+            const identity = { id, name: label.trim().slice(0, 60), role: 'subagent' }
             this.#identities.set(id, identity)
             return identity
           }
@@ -267,7 +267,6 @@ class Field {
       id,
       name: shortId(id),
       role: parentId === undefined || parentId === null ? 'root' : 'subagent',
-      mode: 'delegate',
     }
     this.#identities.set(id, identity)
     return identity
@@ -432,9 +431,8 @@ class Field {
       detail: input.detail,
       kind: input.kind,
       author: input.author,
-      role: input.role ?? 'unknown',
-      mode: input.mode ?? 'delegate',
-      from: String(input.from ?? ''),
+      role: input.role,
+      from: input.from,
       createdAt: previous?.createdAt ?? now,
       updatedAt: now,
       rev: (previous?.rev ?? 0) + 1,
@@ -557,10 +555,9 @@ class Field {
       // The name is the point; the id is only worth repeating when it adds a
       // handle the name does not already carry, such as a teammate's session.
       const short = shortId(trace.from)
-      const role = trace.role === undefined || trace.role === 'unknown' ? '' : trace.role
       const who = trace.author === short
-        ? (role === '' ? short : `${short} (${role})`)
-        : `${trace.author} (${role === '' ? short : `${role} ${short}`})`
+        ? `${short} (${trace.role})`
+        : `${trace.author} (${trace.role} ${short})`
       return [
         `[${trace.kind}] ${trace.key} — ${oneLine(trace.title)}`,
         `  from ${who}, updated ${ago(trace.updatedAt)} ago, rev ${trace.rev}, ${expiry}`,
@@ -694,7 +691,6 @@ export function apply(ctx, config) {
         kind,
         author,
         role: identity.role,
-        mode: identity.mode,
         from: agent.id,
         ttlMinutes,
       })
