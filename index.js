@@ -554,9 +554,13 @@ class Field {
       const body = trace.detail.trim().length === 0
         ? []
         : ['', ...trace.detail.split('\n').map((line) => `  ${line}`)]
-      const who = trace.role === 'unknown' || trace.role === undefined
-        ? `${trace.author} (${shortId(trace.from)})`
-        : `${trace.author} (${trace.role} ${shortId(trace.from)})`
+      // The name is the point; the id is only worth repeating when it adds a
+      // handle the name does not already carry, such as a teammate's session.
+      const short = shortId(trace.from)
+      const role = trace.role === undefined || trace.role === 'unknown' ? '' : trace.role
+      const who = trace.author === short
+        ? (role === '' ? short : `${short} (${role})`)
+        : `${trace.author} (${role === '' ? short : `${role} ${short}`})`
       return [
         `[${trace.kind}] ${trace.key} — ${oneLine(trace.title)}`,
         `  from ${who}, updated ${ago(trace.updatedAt)} ago, rev ${trace.rev}, ${expiry}`,
