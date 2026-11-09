@@ -175,6 +175,8 @@ function readTrace(value) {
     detail: typeof value.detail === 'string' ? value.detail : legacy ?? '',
     kind: value.kind,
     author: value.author,
+    role: typeof value.role === 'string' ? value.role : 'unknown',
+    mode: typeof value.mode === 'string' ? value.mode : 'delegate',
     from: value.from,
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
@@ -197,6 +199,8 @@ class Field {
   #states = new Map()
   /** agent id → colony key. @type {Map<string, string>} */
   #colonies = new Map()
+  /** agent id → resolved identity. @type {Map<string, {id: string, name: string, role: string, mode: string}>} */
+  #identities = new Map()
 
   /**
    * @param ctx - the plugin context, for optional services and diagnostics.
@@ -205,6 +209,78 @@ class Field {
   constructor(ctx, options) {
     this.#ctx = ctx
     this.#options = options
+  }
+
+  /**
+   * Resolve who is writing, so a trace carries a name a peer can act on rather
+   * than an opaque session id.
+   *
+   * The two coordination modes the harness supports have different durable
+   * identities. A Team member has a name the roster and every peer already use;
+   * a plain delegated child only has the label its parent chose when starting
+   * it. Both are recognisable to a peer reading the field; a session id is not.
+   * Resolution is cached because a label costs one parent-catalog read and
+   * never changes afterwards.
+   *
+   * @param agent - the agent about to write.
+   * @returns its identity: stable `id`, display `name`, `role`, and `mode`.
+   */
+  async identify(agent) {
+    const id = agent?.id
+    if (typeof id !== 'string') return { id: '', name: 'unknown', role: 'unknown', mode: 'none' }
+    const cached = this.#identities.get(id)
+    if (cached !== undefined) return cached
+
+    const header = agent.session?.header
+
+    // A Team name outranks a delegation label: it is what peers address.
+    const teams = this.#ctx.get('agentTeams')
+    if (teams !== undefined) {
+      try {
+        const membership = teams.tryMembership(agent)
+        if (membership !== undefined) {
+          const identity = { id, name: String(membership.name), role: membership.role, mode: 'team' }
+          this.#identities.set(id, identity)
+          return identity
+        }
+      } catch {}
+    }
+
+    // A delegated child is known to its peers by the label its parent chose.
+    const parentId = header?.parentSession
+    if (parentId !== undefined && parentId !== null) {
+      const subagents = this.#ctx.get('subagents')
+      if (subagents !== undefined) {
+        try {
+          const rows = await subagents.listChildren(parentId)
+          const label = rows?.find?.((entry) => entry.id === id)?.label
+          if (typeof label === 'string' && label.trim().length > 0) {
+            const identity = { id, name: label.trim().slice(0, 60), role: 'subagent', mode: 'delegate' }
+            this.#identities.set(id, identity)
+            return identity
+          }
+        } catch {}
+      }
+    }
+
+    const identity = {
+      id,
+      name: shortId(id),
+      role: parentId === undefined || parentId === null ? 'root' : 'subagent',
+      mode: 'delegate',
+    }
+    this.#identities.set(id, identity)
+    return identity
+  }
+
+  /**
+   * The display name already resolved for an agent, for the synchronous render
+   * path. A caller that has not written yet falls back to its short id.
+   * @param agent - the viewing agent.
+   * @returns its name, or the session id suffix.
+   */
+  nameOf(agent) {
+    return this.#identities.get(agent?.id)?.name ?? shortId(agent?.id)
   }
 
   /**
@@ -356,6 +432,8 @@ class Field {
       detail: input.detail,
       kind: input.kind,
       author: input.author,
+      role: input.role ?? 'unknown',
+      mode: input.mode ?? 'delegate',
       from: String(input.from ?? ''),
       createdAt: previous?.createdAt ?? now,
       updatedAt: now,
@@ -435,7 +513,7 @@ class Field {
 
     const shown = traces.slice(0, this.#options.maxEntries)
     const hidden = traces.length - shown.length
-    const self = shortId(agent?.id)
+    const self = this.nameOf(agent)
     const lines = shown.map((trace) => {
       const title = clip(oneLine(trace.title), this.#options.maxTextChars)
       return `- [${trace.kind}] ${trace.key} · ${trace.author} · ${ago(trace.updatedAt)} — ${title}`
@@ -476,9 +554,12 @@ class Field {
       const body = trace.detail.trim().length === 0
         ? []
         : ['', ...trace.detail.split('\n').map((line) => `  ${line}`)]
+      const who = trace.role === 'unknown' || trace.role === undefined
+        ? `${trace.author} (${shortId(trace.from)})`
+        : `${trace.author} (${trace.role} ${shortId(trace.from)})`
       return [
         `[${trace.kind}] ${trace.key} — ${oneLine(trace.title)}`,
-        `  from ${trace.author}, updated ${ago(trace.updatedAt)} ago, rev ${trace.rev}, ${expiry}`,
+        `  from ${who}, updated ${ago(trace.updatedAt)} ago, rev ${trace.rev}, ${expiry}`,
         ...body,
       ].join('\n')
     })
@@ -564,7 +645,7 @@ export function apply(ctx, config) {
         },
         author: {
           type: 'string',
-          description: 'Short label peers can attribute the trace to; defaults to the caller session id suffix.',
+          description: 'Override the name peers attribute the trace to. By default it is your Team member name, or the label your parent gave this delegation; a session id suffix is only the last resort.',
         },
         ttl_minutes: {
           type: 'integer',
@@ -575,12 +656,13 @@ export function apply(ctx, config) {
     presentCall: (args) => (typeof args?.key === 'string'
       ? { card: 'generic', title: `Leave trace · ${args.key}`, kind: 'other' }
       : undefined),
-    execute(args, exec) {
+    execute: async (args, exec) => {
       const agent = exec?.agent
       if (agent === undefined) throw new Error(`${LEAVE} requires an owning agent session`)
       const colony = field.colonyOf(agent)
       if (colony === undefined) throw new Error(`${LEAVE} cannot resolve this agent's delegation tree`)
 
+      const identity = await field.identify(agent)
       const key = traceKey(args?.key)
       const title = typeof args?.title === 'string' ? oneLine(args.title) : ''
       if (title.length === 0) throw new Error('`title` must be a non-empty string')
@@ -593,7 +675,7 @@ export function apply(ctx, config) {
       if (!KINDS.includes(kind)) throw new Error(`\`kind\` must be one of: ${KINDS.join(', ')}`)
       const author = typeof args?.author === 'string' && args.author.trim().length > 0
         ? args.author.trim().slice(0, 40)
-        : shortId(agent.id)
+        : identity.name
       let ttlMinutes = options.defaultTtlMinutes
       if (args?.ttl_minutes !== undefined) {
         const requested = Number(args.ttl_minutes)
@@ -607,13 +689,15 @@ export function apply(ctx, config) {
         detail,
         kind,
         author,
+        role: identity.role,
+        mode: identity.mode,
         from: agent.id,
         ttlMinutes,
       })
       const total = field.list(colony).length
       const mine = field.list(colony).filter((entry) => entry.from === agent.id).length
       const hasDetail = detail.length === 0 ? 'no detail' : `${detail.length} characters of detail`
-      return `Left trace \`${key}\` (${kind}, rev ${trace.rev}, ${hasDetail}); the field now holds ${total} trace${total === 1 ? '' : 's'}, ${mine} of them yours. `
+      return `Left trace \`${key}\` as ${author} (${identity.role}), ${kind}, rev ${trace.rev}, ${hasDetail}; the field now holds ${total} trace${total === 1 ? '' : 's'}, ${mine} of them yours. `
         + 'Peers see the title on their next step without any message; they read the detail only if they ask for it.'
     },
   })

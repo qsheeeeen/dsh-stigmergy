@@ -27,7 +27,7 @@ const childAgent = { id: childSession.id, session: childSession }
 const grandAgent = { id: grandSession.id, session: grandSession }
 const otherAgent = { id: otherSession.id, session: otherSession }
 
-function fakeContext(tools, contexts, sections = []) {
+function fakeContext(tools, contexts, sections = [], services = {}) {
   return {
     tools: {
       register: (definition) => { tools.set(definition.name, definition); return () => {} },
@@ -37,7 +37,7 @@ function fakeContext(tools, contexts, sections = []) {
       section: (section) => { sections.push(section); return () => {} },
       context: (context) => { contexts.push(context); return () => {} },
     },
-    get: (name) => (name === 'sessions' ? { get: (id) => sessions.get(id) } : undefined),
+    get: (name) => (name === 'sessions' ? { get: (id) => sessions.get(id) } : services[name]),
     logger: { warn: (message) => console.warn('[warn]', message) },
   }
 }
@@ -88,19 +88,19 @@ assert.doesNotMatch(replaced, /snake_case/, 'the slot was replaced')
 assert.doesNotMatch(replaced, /db\/0042\.sql\. Evidence/, 'the old detail is gone with the old trace')
 
 // --- bounds are enforced instead of silently rewritten --------------------
-assert.throws(
+await assert.rejects(
   () => leave.execute({ key: 'bad', title: 'x'.repeat(161) }, { agent: childAgent }),
   /`title` must be at most 160 characters/,
 )
-assert.throws(
+await assert.rejects(
   () => leave.execute({ key: 'bad', title: 'ok', detail: 'y'.repeat(4001) }, { agent: childAgent }),
   /`detail` must be at most 4000 characters/,
 )
-assert.throws(
+await assert.rejects(
   () => leave.execute({ key: 'bad', title: '   ' }, { agent: childAgent }),
   /`title` must be a non-empty string/,
 )
-assert.throws(
+await assert.rejects(
   () => leave.execute({ key: 'bad', title: 'x', kind: 'claim' }, { agent: childAgent }),
   /`kind` must be one of/,
 )
@@ -109,7 +109,7 @@ assert.doesNotMatch(await read.execute({}, { agent: rootAgent }), /bad/, 'a reje
 // --- a numeric string TTL is accepted and normalized ----------------------
 await leave.execute({ key: 'ttl', title: 'Short lived', ttl_minutes: '1' }, { agent: childAgent })
 assert.match(await read.execute({ keys: ['ttl'] }, { agent: rootAgent }), /expires in 1m/)
-assert.throws(
+await assert.rejects(
   () => leave.execute({ key: 'ttl', title: 'x', ttl_minutes: 'soon' }, { agent: childAgent }),
   /`ttl_minutes` must be a number/,
 )
@@ -159,6 +159,50 @@ assert.equal(normalizeConfig(undefined).directory, '.dsh-stigmergy')
 assert.equal(sections.length, 1)
 assert.match(sections[0].text({ scope: rootAgent }), /stigmergic/)
 assert.equal(contexts.length, 1)
+
+// --- identity resolves per coordination mode ------------------------------
+const teamSession = session('session-team005', root, 'session-root0001')
+const teamAgent = { id: teamSession.id, session: teamSession }
+const roster = new Map([[teamAgent.id, { root: rootAgent, id: 'team-1', role: 'teammate', name: 'parser' }]])
+const catalog = new Map([[childSession.id, 'parse csv pipeline']])
+
+const identityTools = new Map()
+const identityContexts = []
+apply(fakeContext(identityTools, identityContexts, [], {
+  agentTeams: { tryMembership: (agent) => roster.get(agent.id) },
+  subagents: {
+    listChildren: async (parentId) => (parentId === rootSession.id
+      ? [...catalog].map(([id, label]) => ({ id, createdAt: 1, mode: 'continuable', label }))
+      : []),
+  },
+}), {})
+
+const identityLeave = identityTools.get('stigmergy_leave')
+const identityRead = identityTools.get('stigmergy_read')
+
+const teamLeft = await identityLeave.execute({ key: 'id/team', title: 'Written by a teammate' }, { agent: teamAgent })
+assert.match(teamLeft, /as parser \(teammate\)/, 'a team member is named by its roster name')
+assert.match(
+  await identityRead.execute({ keys: ['id/team'] }, { agent: rootAgent }),
+  /from parser \(teammate/,
+  'the read shows the name and role, not just an id',
+)
+
+assert.match(
+  await identityLeave.execute({ key: 'id/delegate', title: 'Written by a delegated child' }, { agent: childAgent }),
+  /as parse csv pipeline \(subagent\)/,
+  'a delegated child is named by the label its parent chose',
+)
+
+assert.match(
+  await identityLeave.execute({ key: 'id/override', title: 'Explicit name', author: 'migration-owner' }, { agent: childAgent }),
+  /as migration-owner/,
+  'an explicit author wins',
+)
+
+const identityView = identityContexts[0].text({ agent: rootAgent, scope: rootAgent })
+assert.match(identityView, /id\/team · parser/, 'the snapshot renders the resolved name')
+assert.match(identityView, /id\/delegate · parse csv pipeline/)
 
 fs.rmSync(root, { recursive: true, force: true })
 console.log('all checks passed')

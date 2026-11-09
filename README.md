@@ -46,6 +46,12 @@ A good title is not a summary of the detail. It is the one thing that changes a 
 2. **Injection.** A `systemPrompt.context` renders the field into the runtime context while the request is assembled — titles only. DSH recomputes runtime context for every request, so the field is live rather than a snapshot taken at startup.
 3. **Persistence.** The field is mirrored to `<cwd>/.dsh-stigmergy/<colony>.jsonl`. It survives a restart, ordinary `read` and `grep` can inspect it, and an edit made outside the plugin is adopted on the next read.
 4. **Evaporation.** `expiresAt` drops a trace out of the field; the mirror is compacted every 200 appends.
+5. **Identity.** Every trace carries a stable `from` (the session id) and a display `author`. The display name is resolved automatically, because the two coordination modes have different durable identities:
+   - **Agent Team** — the roster name from `agentTeams.tryMembership`, which is what peers already address.
+   - **Standard delegation** — the label the parent chose when it started the child, read once from the parent's catalog (`subagents.listChildren`).
+   - Neither — the session id suffix, and nothing better is invented.
+
+   The raw id stays on the trace and appears in `read`, because that is what `list_agents` shows a parent. `author` can override the resolved name when a role matters more than a name.
 
 ## Configuration
 
@@ -66,7 +72,7 @@ A good title is not a summary of the detail. It is the one thing that changes a 
 node test/check.mjs
 ```
 
-A regression check over a fake Cordis context. It covers: sharing inside a tree, isolation across trees, the title/detail split, slot replacement, enforced bounds, retraction, replay from the mirror, migration of an older record, adoption of external edits, and config normalization.
+A regression check over a fake Cordis context. It covers: sharing inside a tree, isolation across trees, the title/detail split, slot replacement, enforced bounds, retraction, replay from the mirror, migration of an older record, adoption of external edits, identity resolution in both coordination modes, and config normalization.
 
 Live records:
 
