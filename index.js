@@ -544,13 +544,19 @@ export function apply(ctx, config) {
       const key = traceKey(args?.key)
       const text = typeof args?.text === 'string' ? args.text.trim() : ''
       if (text.length === 0) throw new Error('`text` must be a non-empty string')
-      const kind = KINDS.includes(args?.kind) ? args.kind : 'note'
+      // Reject an unknown kind instead of quietly storing `note`: the field is
+      // shared state, so what a caller believes it wrote must be what peers read.
+      const kind = args?.kind === undefined ? 'note' : args.kind
+      if (!KINDS.includes(kind)) throw new Error(`\`kind\` must be one of: ${KINDS.join(', ')}`)
       const author = typeof args?.author === 'string' && args.author.trim().length > 0
         ? args.author.trim().slice(0, 40)
         : shortId(agent.id)
-      const ttlMinutes = typeof args?.ttl_minutes === 'number'
-        ? integer(args.ttl_minutes, options.defaultTtlMinutes, 0, 10080)
-        : options.defaultTtlMinutes
+      let ttlMinutes = options.defaultTtlMinutes
+      if (args?.ttl_minutes !== undefined) {
+        const requested = Number(args.ttl_minutes)
+        if (!Number.isFinite(requested)) throw new Error('`ttl_minutes` must be a number')
+        ttlMinutes = integer(requested, options.defaultTtlMinutes, 0, 10080)
+      }
 
       const trace = field.put(colony, {
         key,

@@ -94,6 +94,21 @@ await clear.execute({ key: 'ephemeral' }, { agent: rootAgent })
 const after = await read.execute({}, { agent: rootAgent })
 assert.doesNotMatch(after, /ephemeral/)
 
+// --- an unknown kind fails instead of being silently rewritten ------------
+assert.throws(
+  () => leave.execute({ key: 'bad', text: 'x', kind: 'claim' }, { agent: childAgent }),
+  /`kind` must be one of/,
+)
+assert.doesNotMatch(await read.execute({}, { agent: rootAgent }), /bad/, 'a rejected write leaves no trace')
+
+// --- a numeric string TTL is accepted and normalized ----------------------
+await leave.execute({ key: 'ttl', text: 'short lived', ttl_minutes: '1' }, { agent: childAgent })
+assert.match(await read.execute({ keys: ['ttl'] }, { agent: rootAgent }), /expires in 1m/)
+assert.throws(
+  () => leave.execute({ key: 'ttl', text: 'x', ttl_minutes: 'soon' }, { agent: childAgent }),
+  /`ttl_minutes` must be a number/,
+)
+
 // --- persistence: a fresh instance replays the mirror ---------------------
 const files = fs.readdirSync(path.join(root, '.dsh-stigmergy'))
 assert.equal(files.length, 1, 'one mirror per colony')
