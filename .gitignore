@@ -1,0 +1,7 @@
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
+
+# runtime state the plugin writes into whatever workspace it runs in
+.dsh-stigmergy/

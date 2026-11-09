@@ -1,0 +1,19 @@
+# Stigmergy: one shared trace field for a delegation tree.
+#
+# Every agent in a tree (a session and all of its subagents) reads the same
+# bounded set of traces before each step, so an agent coordinates by changing
+# the environment instead of messaging a peer.
+#
+# The config below is the default; a user can override any field in the
+# profile's own patch layer without editing this file.
+
+- insert:
+    - id: stigmergy
+      name: '@local/dsh-stigmergy'
+      config:
+        directory: .dsh-stigmergy
+        scope: tree
+        maxEntries: 12
+        maxTextChars: 280
+        defaultTtlMinutes: 90
+        promptSection: true

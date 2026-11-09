@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Stigmergy",
+    "description": "A shared trace field for a delegation tree: agents coordinate by leaving traces in a common environment instead of messaging each other."
+  }
+}
