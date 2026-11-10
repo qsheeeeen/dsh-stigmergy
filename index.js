@@ -200,7 +200,7 @@ class Field {
   #scopeKeys = new Map()
   /** agent id → resolved identity. @type {Map<string, {id: string, name: string, role: string}>} */
   #identities = new Map()
-  /** agent id → identity resolutions attempted, bounded so a failing lookup cannot spin. @type {Map<string, number>} */
+  /** agent id → identity resolutions attempted, bounded so a failing lookup cannot spin. @type {Map<string, {count: number, at: number}>} */
   #attempts = new Map()
 
   /**
@@ -214,17 +214,18 @@ class Field {
 
   /**
    * Start resolving an agent's identity without blocking the caller. The name is
-   * needed by the synchronous render path, and it can fail at creation time —
-   * the parent's catalog entry is written around the same moment the child
-   * appears — so a small number of later attempts are allowed.
+   * needed by the synchronous render path, and the parent's catalog entry can
+   * land around the same moment the child appears, so an attempt is allowed to
+   * fail and be repeated a little later.
    * @param agent - the agent whose name is wanted.
    */
   warm(agent) {
     const id = agent?.id
     if (typeof id !== 'string' || this.#identities.has(id)) return
-    const attempts = this.#attempts.get(id) ?? 0
-    if (attempts >= 3) return
-    this.#attempts.set(id, attempts + 1)
+    const now = Date.now()
+    const attempt = this.#attempts.get(id)
+    if (attempt !== undefined && (attempt.count >= 6 || now - attempt.at < 2000)) return
+    this.#attempts.set(id, { count: (attempt?.count ?? 0) + 1, at: now })
     this.identify(agent).catch(() => {})
   }
 
@@ -281,12 +282,14 @@ class Field {
       }
     }
 
-    const identity = {
+    // Deliberately not cached: the parent's catalog entry can land after the
+    // child appears, so a later attempt may still find the label. Caching this
+    // fallback would make the id permanent.
+    return {
       id,
       name: shortId(id),
       role: parentId === undefined || parentId === null ? 'root' : 'subagent',
     }
-    this.#identities.set(id, identity)
     return identity
   }
 
