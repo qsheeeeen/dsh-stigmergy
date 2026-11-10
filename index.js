@@ -498,8 +498,35 @@ class Field {
   }
 
   /**
+   * Agents running in the same field right now, other than the caller.
+   *
+   * This is the automatic half of the field: nobody writes it. It is derived
+   * from the live registry, so an agent learns that a peer has already taken
+   * the work without a trace and without a message. It is deliberately not a
+   * trace: it carries no meaning, only occupancy, and it disappears when the
+   * peer does.
+   *
+   * @param scope - the field's scope key.
+   * @param selfId - the calling agent, which is not a peer of itself.
+   * @returns display names of the running peers.
+   */
+  peersOf(scope, selfId) {
+    const agents = this.#ctx.get('agents')
+    const peers = []
+    for (const other of agents?.list?.() ?? []) {
+      if (other?.id === undefined || other.id === selfId) continue
+      if (other.status !== 'running') continue
+      if (this.scopeKeyOf(other) !== scope) continue
+      const identity = this.#identities.get(other.id)
+      peers.push(identity === undefined ? shortId(other.id) : `"${identity.name}" (${shortId(other.id)})`)
+    }
+    return peers
+  }
+
+  /**
    * The bounded field snapshot injected into every step. Empty while nothing
-   * has ever been left, so a session that never uses the field pays nothing.
+   * has ever been left and nobody else is running, so a session that never uses
+   * the field pays nothing.
    * @param agent - the agent whose step is being assembled.
    * @returns the model-facing snapshot, or an empty string.
    */
@@ -507,21 +534,28 @@ class Field {
     const scope = this.scopeKeyOf(agent)
     if (scope === undefined) return ''
     const traces = this.list(scope)
-    if (traces.length === 0) return ''
+    const peers = this.peersOf(scope, agent?.id)
+    if (traces.length === 0 && peers.length === 0) return ''
 
+    const self = this.nameOf(agent)
     const shown = traces.slice(0, this.#options.maxEntries)
     const hidden = traces.length - shown.length
-    const self = this.nameOf(agent)
-    const lines = shown.map((trace) => {
+    const bullets = shown.map((trace) => {
       const title = clip(oneLine(trace.title), this.#options.maxTextChars)
       return `- [${trace.kind}] ${trace.key} · ${trace.author} · ${ago(trace.updatedAt)} — ${title}`
     })
-    const head = `Shared field: ${traces.length} trace${traces.length === 1 ? '' : 's'}; you are ${self}. `
-      + `Other agents pick up a change on their next step — nothing is sent as a message. `
-      + `Write or replace one with \`${LEAVE}\`; \`${READ}\` returns the detail behind a title.`
-    return hidden === 0
-      ? [head, '', ...lines].join('\n')
-      : [head, '', ...lines, `- ${hidden} more not shown; \`${READ}\` lists the whole field.`].join('\n')
+    if (hidden > 0) bullets.push(`- ${hidden} more not shown; \`${READ}\` lists the whole field.`)
+
+    const head = traces.length === 0
+      ? `Shared field: nothing left here yet; you are ${self}.`
+      : `Shared field: ${traces.length} trace${traces.length === 1 ? '' : 's'}; you are ${self}. `
+        + `Other agents pick up a change on their next step — nothing is sent as a message. `
+        + `Write or replace one with \`${LEAVE}\`; \`${READ}\` returns the detail behind a title.`
+
+    const blocks = [head]
+    if (peers.length > 0) blocks.push(`Working here now: ${peers.join(', ')}`)
+    if (bullets.length > 0) blocks.push(bullets.join('\n'))
+    return blocks.join('\n\n')
   }
 
   /**
@@ -767,6 +801,13 @@ export function apply(ctx, config) {
   ctx.tools.register(leave)
   ctx.tools.register(read)
   ctx.tools.register(clear)
+
+  // Presence is rendered from live state, so a peer's name has to be resolved
+  // before it can be shown. Resolving costs one parent-catalog read and is
+  // cached; it is started here and never blocks the child's creation.
+  ctx.on('agent/created', ({ agent: created }) => {
+    field.identify(created).catch(() => {})
+  })
 
   if (options.promptSection) {
     ctx.systemPrompt.section({

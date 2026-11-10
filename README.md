@@ -62,6 +62,15 @@ The mirror is append-only JSONL, one operation per line:
 
 The shape is exact. A line missing any trace field is dropped rather than repaired, because a half-written record would otherwise enter a field that every agent reads on every step.
 
+### What is automatic
+
+Only two things happen without the model calling anything:
+
+- **the snapshot** — the field is rendered into the runtime context as a user message before each request, and only when its text changed; unchanged steps append nothing.
+- **presence** — `Working here now: "parse csv" (a1b2)` lists the agents currently running in the same field. It is derived from the live registry, carries no meaning, and disappears when the peer does. It is never written to the mirror.
+
+Trace content stays manual on purpose. A title has to be the one fact that changes a peer's next action, and only the writer can compress a run into that.
+
 ## Configuration
 
 `config` in `cordis.patch.yml`, overridable from your own profile patch layer:

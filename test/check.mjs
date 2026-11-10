@@ -38,6 +38,7 @@ function fakeContext(tools, contexts, sections = [], services = {}) {
       context: (context) => { contexts.push(context); return () => {} },
     },
     get: (name) => (name === 'sessions' ? { get: (id) => sessions.get(id) } : services[name]),
+    on: () => () => {},
     logger: { warn: (message) => console.warn('[warn]', message) },
   }
 }
@@ -169,6 +170,31 @@ assert.equal(options.maxEntries, 2)
 assert.equal(options.scope, 'session')
 assert.equal(options.defaultTtlMinutes, 0)
 assert.equal(normalizeConfig(undefined).directory, '.dsh-stigmergy')
+
+// --- presence is automatic: derived from the live registry, never written --
+const peerSession = session('session-peer77', root, 'session-root0001')
+const peerAgent = { id: peerSession.id, session: peerSession, status: 'running' }
+const presenceTools = new Map()
+const presenceContexts = []
+apply(fakeContext(presenceTools, presenceContexts, [], {
+  agents: { list: () => [{ ...rootAgent, status: 'running' }, peerAgent] },
+}), {})
+
+const presenceView = presenceContexts[0].text({ agent: rootAgent, scope: rootAgent })
+assert.match(presenceView, /Working here now:/, 'presence appears with no trace at all')
+assert.match(presenceView, /peer77/, 'the peer is listed by its session suffix until a name is known')
+assert.match(presenceView, /^Working here now: peer77$/m, 'the caller is not listed as its own peer')
+
+const soloSession = session('session-solo99', root)
+const soloAgent = { id: soloSession.id, session: soloSession }
+const idleTools = new Map()
+const idleContexts = []
+apply(fakeContext(idleTools, idleContexts), {})
+assert.equal(
+  idleContexts[0].text({ agent: soloAgent, scope: soloAgent }),
+  '',
+  'an idle, untouched field costs nothing',
+)
 
 // --- the protocol section is registered and gated on tool visibility ------
 assert.equal(sections.length, 1)
