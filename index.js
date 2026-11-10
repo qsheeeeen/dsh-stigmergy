@@ -200,6 +200,8 @@ class Field {
   #scopeKeys = new Map()
   /** agent id → resolved identity. @type {Map<string, {id: string, name: string, role: string}>} */
   #identities = new Map()
+  /** agent id → identity resolutions attempted, bounded so a failing lookup cannot spin. @type {Map<string, number>} */
+  #attempts = new Map()
 
   /**
    * @param ctx - the plugin context, for optional services and diagnostics.
@@ -211,8 +213,24 @@ class Field {
   }
 
   /**
-   * Resolve who is writing, so a trace carries a name a another agent can act on rather
-   * than an opaque session id.
+   * Start resolving an agent's identity without blocking the caller. The name is
+   * needed by the synchronous render path, and it can fail at creation time —
+   * the parent's catalog entry is written around the same moment the child
+   * appears — so a small number of later attempts are allowed.
+   * @param agent - the agent whose name is wanted.
+   */
+  warm(agent) {
+    const id = agent?.id
+    if (typeof id !== 'string' || this.#identities.has(id)) return
+    const attempts = this.#attempts.get(id) ?? 0
+    if (attempts >= 3) return
+    this.#attempts.set(id, attempts + 1)
+    this.identify(agent).catch(() => {})
+  }
+
+  /**
+   * Resolve who is writing, so a trace carries a name another agent can act on
+   * rather than an opaque session id.
    *
    * The two coordination modes the harness supports have different durable
    * identities. A Team member has a name the roster and the other agents already
@@ -518,7 +536,16 @@ class Field {
       if (other.status !== 'running') continue
       if (this.scopeKeyOf(other) !== scope) continue
       const identity = this.#identities.get(other.id)
-      peers.push(identity === undefined ? shortId(other.id) : `"${identity.name}" (${shortId(other.id)})`)
+      const short = shortId(other.id)
+      if (identity === undefined) {
+        // Resolve in the background; this render falls back to the id.
+        this.warm(other)
+        peers.push(short)
+      } else if (identity.name === short) {
+        peers.push(short)
+      } else {
+        peers.push(`"${identity.name}" (${short})`)
+      }
     }
     return peers
   }
@@ -806,7 +833,7 @@ export function apply(ctx, config) {
   // before it can be shown. Resolving costs one parent-catalog read and is
   // cached; it is started here and never blocks the child's creation.
   ctx.on('agent/created', ({ agent: created }) => {
-    field.identify(created).catch(() => {})
+    field.warm(created)
   })
 
   if (options.promptSection) {
